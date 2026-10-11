@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "omniroute": {
+      "serverUrl": "http://localhost:3000/mcp",
+      "headers": {
+        "Authorization": "Bearer sk-51038eb873589e08-6081b6-a01c6537",
+        "x-api-key": "sk-51038eb873589e08-6081b6-a01c6537"
+      }
+    }
+  }
+}
