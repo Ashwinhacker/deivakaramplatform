@@ -1,5 +1,6 @@
 // DEIVAKARAM RAZORPAY GATEWAY INTEGRATION UTILITY
-// Handles dynamic script loading, checkout dialog launch, duplicate prevention, and response verification.
+// Handles dynamic script loading, real order initiation, checkout dialog launch,
+// and authoritative server-side signature verification.
 
 export interface RazorpayOptions {
   keyId?: string;
@@ -7,19 +8,28 @@ export interface RazorpayOptions {
   name?: string;
   description: string;
   orderId?: string;
+  item_type?: 'donation' | 'celebration_package' | 'campaign' | 'general';
+  item_id?: string;
+  selected_addons?: Record<string, boolean>;
+  food_count?: number;
+  donation_data?: any;
+  booking_data?: any;
   prefill: {
     name: string;
     email: string;
     contact: string;
   };
   notes?: Record<string, string>;
-  simulateFailure?: boolean; // For testing failure flows
+  simulateFailure?: boolean; // For testing UI failure states
 }
 
 export interface RazorpaySuccessResult {
   razorpay_payment_id: string;
   razorpay_order_id: string;
-  razorpay_signature?: string;
+  razorpay_signature: string;
+  verified: boolean;
+  donation?: any;
+  booking?: any;
 }
 
 export interface RazorpayFailureResult {
@@ -52,7 +62,7 @@ export const loadRazorpayScript = (): Promise<boolean> => {
     script.async = true;
     script.onload = () => resolve(true);
     script.onerror = () => {
-      console.warn('Razorpay checkout.js script failed to load from CDN. Fallback mode will be used.');
+      console.error('[Razorpay Gateway]: checkout.js script failed to load from Razorpay CDN.');
       resolve(false);
     };
     document.body.appendChild(script);
@@ -62,38 +72,19 @@ export const loadRazorpayScript = (): Promise<boolean> => {
 export const initiateRazorpayPayment = async (
   options: RazorpayOptions
 ): Promise<RazorpaySuccessResult> => {
+  // Ensure Razorpay SDK is loaded
   const isLoaded = await loadRazorpayScript();
-  const envKey = (import.meta as any).env?.VITE_RAZORPAY_KEY_ID;
-  const activeKey = envKey || (options.keyId && !options.keyId.includes('DVK826194018') ? options.keyId : 'rzp_test_ThjuUUhraxOPtf');
-  const amountPaise = Math.round(options.amount * 100);
-
-  // 1. Fetch official Order ID from backend /api/create-razorpay-order
-  let orderId = options.orderId;
-  try {
-    const orderRes = await fetch('/api/create-razorpay-order', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        amount: options.amount,
-        receipt: `dvk_rcpt_${Date.now()}`,
-        notes: options.notes || {}
-      })
-    });
-    if (orderRes.ok) {
-      const orderData = await orderRes.json();
-      if (orderData.id) {
-        orderId = orderData.id;
-      }
-    }
-  } catch (e) {
-    console.warn('Backend order creation fetch failed, falling back to local order ID:', e);
+  if (!isLoaded || !(window as any).Razorpay) {
+    throw {
+      code: 'GATEWAY_UNAVAILABLE',
+      description: 'Unable to connect to Razorpay secure checkout service. Please check your internet connection or try again later.',
+      source: 'network',
+      step: 'checkout_load',
+      reason: 'cdn_unreachable'
+    } as RazorpayFailureResult;
   }
 
-  if (!orderId) {
-    orderId = `order_dvk_${Date.now()}`;
-  }
-
-  // If testing failure simulation
+  // Optional UI testing parameter
   if (options.simulateFailure) {
     throw {
       code: 'BAD_REQUEST_ERROR',
@@ -104,112 +95,194 @@ export const initiateRazorpayPayment = async (
     } as RazorpayFailureResult;
   }
 
-  // If Razorpay JS SDK loaded and Razorpay constructor is present
-  if (isLoaded && (window as any).Razorpay) {
-    return await new Promise<RazorpaySuccessResult>((resolve, reject) => {
-      let isSettled = false;
-      const isValidRzpOrderId = typeof orderId === 'string' && /^order_[a-zA-Z0-9]{14}$/.test(orderId);
+  // 1. Authoritative Order Creation on Backend
+  let orderData: any = null;
+  let activeKey = options.keyId;
 
-      const rzpOptions = {
-        key: activeKey,
-        amount: amountPaise,
+  try {
+    const orderRes = await fetch('/api/create-razorpay-order', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        amount: options.amount,
         currency: 'INR',
-        name: options.name || 'DEIVAKARAM CHARITABLE TRUST',
-        description: options.description,
-        image: '/logo.png',
-        order_id: isValidRzpOrderId ? orderId : undefined,
-        prefill: {
-          name: options.prefill.name,
-          email: options.prefill.email,
-          contact: options.prefill.contact
-        },
-        notes: options.notes || {},
-        theme: {
-          color: '#0A4A9C'
-        },
-        modal: {
-          ondismiss: () => {
-            if (!isSettled) {
-              isSettled = true;
-              reject({
-                code: 'PAYMENT_CANCELLED',
-                description: 'Payment window was closed by the donor.',
-                source: 'customer',
-                step: 'checkout_modal',
-                reason: 'user_dismissed'
-              });
-            }
-          }
-        },
-        handler: async (response: any) => {
-          if (!isSettled) {
-            isSettled = true;
+        receipt: `dvk_rcpt_${Date.now()}`,
+        item_type: options.item_type || 'donation',
+        item_id: options.item_id,
+        selected_addons: options.selected_addons,
+        food_count: options.food_count,
+        notes: options.notes || {}
+      })
+    });
 
-            const result: RazorpaySuccessResult = {
-              razorpay_payment_id: response.razorpay_payment_id || `pay_${Date.now()}`,
-              razorpay_order_id: response.razorpay_order_id || orderId!,
-              razorpay_signature: response.razorpay_signature || `sig_${Math.random().toString(36).substring(2)}`
-            };
+    if (!orderRes.ok) {
+      const errBody = await orderRes.json().catch(() => ({}));
+      throw new Error(errBody.error || `Server order creation failed with status ${orderRes.status}`);
+    }
 
-            // Verify on backend asynchronously
-            try {
-              await fetch('/api/verify-payment', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  razorpay_order_id: result.razorpay_order_id,
-                  razorpay_payment_id: result.razorpay_payment_id,
-                  razorpay_signature: result.razorpay_signature
-                })
-              });
-            } catch (vErr) {
-              console.warn('Background payment verification ping:', vErr);
-            }
+    orderData = await orderRes.json();
+    if (orderData.key_id) {
+      activeKey = orderData.key_id;
+    }
+  } catch (err: any) {
+    console.error('[Razorpay Order Creation Error]:', err);
+    throw {
+      code: 'ORDER_CREATION_FAILED',
+      description: err.message || 'Unable to initiate secure payment order with Razorpay.',
+      source: 'backend',
+      step: 'order_creation',
+      reason: 'api_error'
+    } as RazorpayFailureResult;
+  }
 
-            resolve(result);
-          }
-        }
-      };
+  const finalOrderId = orderData?.id || options.orderId;
+  if (!finalOrderId || !finalOrderId.startsWith('order_')) {
+    throw {
+      code: 'INVALID_ORDER',
+      description: 'Invalid order returned by payment gateway. Transaction aborted.',
+      source: 'gateway',
+      step: 'order_validation',
+      reason: 'malformed_order_id'
+    } as RazorpayFailureResult;
+  }
 
-      try {
-        const rzpInstance = new (window as any).Razorpay(rzpOptions);
-        rzpInstance.on('payment.failed', (resp: any) => {
+  const envKey = (import.meta as any).env?.VITE_RAZORPAY_KEY_ID;
+  const keyToUse = activeKey || envKey;
+  if (!keyToUse) {
+    throw {
+      code: 'MISSING_KEY',
+      description: 'Razorpay Public Key ID is not configured.',
+      source: 'client',
+      step: 'config',
+      reason: 'unconfigured_key'
+    } as RazorpayFailureResult;
+  }
+
+  // 2. Launch Razorpay Checkout Modal
+  return new Promise<RazorpaySuccessResult>((resolve, reject) => {
+    let isSettled = false;
+
+    const rzpOptions = {
+      key: keyToUse,
+      amount: orderData.amount,
+      currency: orderData.currency || 'INR',
+      name: options.name || 'DEIVAKARAM CHARITABLE TRUST',
+      description: options.description,
+      image: '/logo.png',
+      order_id: finalOrderId,
+      prefill: {
+        name: options.prefill.name,
+        email: options.prefill.email,
+        contact: options.prefill.contact
+      },
+      notes: options.notes || {},
+      theme: {
+        color: '#0A4A9C'
+      },
+      modal: {
+        ondismiss: () => {
           if (!isSettled) {
             isSettled = true;
             reject({
-              code: resp.error?.code || 'PAYMENT_FAILED',
-              description: resp.error?.description || 'Payment gateway encountered an error.',
-              source: resp.error?.source || 'gateway',
-              step: resp.error?.step || 'payment',
-              reason: resp.error?.reason || 'declined'
-            });
+              code: 'PAYMENT_CANCELLED',
+              description: 'Payment window was closed by the donor before completion.',
+              source: 'customer',
+              step: 'checkout_modal',
+              reason: 'user_dismissed'
+            } as RazorpayFailureResult);
           }
-        });
-        rzpInstance.open();
-      } catch (err) {
-        console.warn('Razorpay SDK instance open error, using seamless verified test completion:', err);
-        setTimeout(() => {
-          if (!isSettled) {
-            isSettled = true;
-            resolve({
-              razorpay_payment_id: `pay_rzp_${Date.now()}`,
-              razorpay_order_id: orderId!,
-              razorpay_signature: `sig_${Math.random().toString(36).substring(2)}`
-            });
-          }
-        }, 1200);
-      }
-    });
-  }
+        }
+      },
+      handler: async (response: any) => {
+        if (isSettled) return;
+        isSettled = true;
 
-  // Fallback: If Razorpay CDN cannot be reached (e.g. offline or blocked), simulate immediate authorized completion
-  return new Promise((resolve) => {
-    setTimeout(() => {
-      resolve({
-        razorpay_payment_id: `pay_rzp_${Date.now()}`,
-        razorpay_order_id: orderId,
-        razorpay_signature: `sig_${Math.random().toString(36).substring(2)}`
+        if (!response.razorpay_payment_id || !response.razorpay_signature) {
+          reject({
+            code: 'INCOMPLETE_PAYMENT',
+            description: 'Payment response from gateway was incomplete.',
+            source: 'gateway',
+            step: 'response_handler',
+            reason: 'missing_payment_details'
+          } as RazorpayFailureResult);
+          return;
+        }
+
+        // 3. Authoritative Server-side Verification
+        try {
+          const verifyRes = await fetch('/api/verify-payment', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              razorpay_order_id: response.razorpay_order_id || finalOrderId,
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_signature: response.razorpay_signature,
+              donation_data: options.donation_data,
+              booking_data: options.booking_data
+            })
+          });
+
+          const verifyData = await verifyRes.json();
+          if (!verifyRes.ok || !verifyData.verified) {
+            reject({
+              code: 'VERIFICATION_FAILED',
+              description: verifyData.error || 'Server signature verification rejected the payment transaction.',
+              source: 'backend',
+              step: 'verification',
+              reason: 'signature_or_amount_mismatch'
+            } as RazorpayFailureResult);
+            return;
+          }
+
+          resolve({
+            razorpay_payment_id: response.razorpay_payment_id,
+            razorpay_order_id: response.razorpay_order_id || finalOrderId,
+            razorpay_signature: response.razorpay_signature,
+            verified: true,
+            donation: verifyData.donation,
+            booking: verifyData.booking
+          });
+        } catch (vErr: any) {
+          console.error('[Verification Network Error]:', vErr);
+          reject({
+            code: 'VERIFICATION_NETWORK_ERROR',
+            description: 'Payment succeeded at gateway, but server verification could not be confirmed. Webhook reconciliation will complete your transaction.',
+            source: 'network',
+            step: 'verification',
+            reason: vErr.message || 'network_error'
+          } as RazorpayFailureResult);
+        }
+      }
+    };
+
+    try {
+      const rzpInstance = new (window as any).Razorpay(rzpOptions);
+
+      rzpInstance.on('payment.failed', (resp: any) => {
+        if (!isSettled) {
+          isSettled = true;
+          reject({
+            code: resp.error?.code || 'PAYMENT_FAILED',
+            description: resp.error?.description || 'Payment authorization was declined.',
+            source: resp.error?.source || 'gateway',
+            step: resp.error?.step || 'payment',
+            reason: resp.error?.reason || 'declined'
+          } as RazorpayFailureResult);
+        }
       });
-    }, 1200);
+
+      rzpInstance.open();
+    } catch (err: any) {
+      if (!isSettled) {
+        isSettled = true;
+        reject({
+          code: 'CHECKOUT_OPEN_ERROR',
+          description: err.message || 'Could not launch Razorpay Checkout modal.',
+          source: 'client',
+          step: 'open',
+          reason: 'exception'
+        } as RazorpayFailureResult);
+      }
+    }
   });
 };

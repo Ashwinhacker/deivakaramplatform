@@ -1,15 +1,28 @@
 import { createClient } from '@supabase/supabase-js';
 
-const env: Record<string, any> = (typeof import.meta !== 'undefined' && import.meta.env) || (globalThis as any)?.process?.env || {};
-const supabaseUrl = env.VITE_SUPABASE_URL || '';
-const supabaseAnonKey = env.VITE_SUPABASE_ANON_KEY || '';
+const getEnv = (key: string): string => {
+  if (typeof import.meta !== 'undefined' && (import.meta as any).env && (import.meta as any).env[key]) {
+    return (import.meta as any).env[key];
+  }
+  const proc = (globalThis as any)?.process;
+  if (typeof proc !== 'undefined' && proc.env && proc.env[key]) {
+    return proc.env[key] as string;
+  }
+  return '';
+};
 
-export const isSupabaseConfigured = Boolean(env.VITE_SUPABASE_URL) && Boolean(env.VITE_SUPABASE_ANON_KEY);
+export const getSupabaseUrl = (): string => getEnv('VITE_SUPABASE_URL') || getEnv('SUPABASE_URL') || '';
+export const getSupabaseKey = (): string => getEnv('VITE_SUPABASE_ANON_KEY') || getEnv('SUPABASE_ANON_KEY') || getEnv('VITE_SUPABASE_PUBLISHABLE_KEY') || getEnv('SUPABASE_PUBLISHABLE_KEY') || '';
+
+export const isSupabaseConfigured = Boolean(getSupabaseUrl()) && Boolean(getSupabaseKey());
+
+const supabaseUrl = getSupabaseUrl();
+const supabaseAnonKey = getSupabaseKey();
 
 // Supabase createClient throws a runtime error if URL or Key is empty.
 // We pass valid placeholder values to prevent startup crashes when running in Mock DB mode.
-const finalUrl = isSupabaseConfigured ? supabaseUrl : 'https://placeholder-project.supabase.co';
-const finalKey = isSupabaseConfigured ? supabaseAnonKey : 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.placeholder-key';
+const finalUrl = supabaseUrl || 'https://placeholder-project.supabase.co';
+const finalKey = supabaseAnonKey || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.placeholder-key';
 
 export const supabase = createClient(finalUrl, finalKey, {
   auth: {

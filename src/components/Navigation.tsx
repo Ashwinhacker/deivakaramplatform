@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Menu, X, Heart, ShieldAlert, User, LogOut } from 'lucide-react';
 import { getSettings } from '../db';
+import { signOutUser } from '../utils/authService';
 
 interface NavigationProps {
   currentPage: string;
@@ -50,10 +51,10 @@ export const Navigation: React.FC<NavigationProps> = ({
     };
   }, []);
 
-  const handleLogout = () => {
-    localStorage.removeItem('deivakaram_active_user');
-    window.dispatchEvent(new Event('auth-changed'));
-    onNavigate('home');
+  const handleLogout = async () => {
+    await signOutUser();
+    setActiveUser(null);
+    onNavigate('signin');
   };
 
   const navItems = [
@@ -124,21 +125,72 @@ export const Navigation: React.FC<NavigationProps> = ({
         {/* Right Actions Block */}
         <div className="nav-actions-block">
           {activeUser ? (
-            <div className="nav-user-menu">
+            <div className="nav-user-menu" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span 
+                className="nav-user-label" 
+                title={activeUser.email}
+                style={{ 
+                  fontSize: '12.5px', 
+                  color: 'rgba(255, 255, 255, 0.95)', 
+                  fontWeight: 600,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '5px',
+                  background: 'rgba(255, 255, 255, 0.12)',
+                  padding: '5px 11px',
+                  borderRadius: '16px'
+                }}
+              >
+                <User size={13} /> {activeUser.name || activeUser.email}
+              </span>
               <button 
                 onClick={() => handleLinkClick(activeUser.role !== 'donor' ? 'crm_dashboard' : 'donor_dashboard')} 
                 className="btn btn-outline btn-sm nav-btn-user"
+                style={{ color: '#fff', borderColor: 'rgba(255,255,255,0.4)', padding: '5px 10px', fontSize: '12px' }}
               >
-                <User size={14} /> Dashboard ({activeUser.name.split(' ')[0]})
+                Dashboard
               </button>
-              <button onClick={handleLogout} className="btn-logout-icon" title="Logout">
-                <LogOut size={16} />
+              <button 
+                onClick={handleLogout} 
+                className="btn btn-sm btn-nav-signout"
+                id="nav-sign-out-btn"
+                title="Sign Out"
+                style={{
+                  background: '#ef4444',
+                  color: '#ffffff',
+                  border: 'none',
+                  borderRadius: '6px',
+                  padding: '5px 11px',
+                  fontSize: '12px',
+                  fontWeight: 600,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                  cursor: 'pointer'
+                }}
+              >
+                <LogOut size={13} /> Sign Out
               </button>
             </div>
           ) : (
-            <button onClick={() => handleLinkClick('donor_portal_login')} className="nav-login-link">
-              Donor Login
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <button 
+                onClick={() => handleLinkClick('signin')} 
+                className="nav-login-link"
+                id="nav-signin-link"
+                style={{ cursor: 'pointer' }}
+              >
+                Sign In
+              </button>
+              <button 
+                onClick={() => handleLinkClick('signup')} 
+                className="btn btn-outline btn-sm desktop-only"
+                id="nav-signup-link"
+                style={{ color: '#fff', borderColor: 'rgba(255,255,255,0.4)', padding: '5px 10px', fontSize: '12px' }}
+              >
+                Create Account
+              </button>
+            </div>
           )}
 
           <button onClick={onOpenVolunteer} className="btn btn-outline btn-sm btn-nav-volunteer desktop-only">
@@ -198,20 +250,33 @@ export const Navigation: React.FC<NavigationProps> = ({
 
               {activeUser ? (
                 <>
+                  <div style={{ padding: '8px 0', color: '#38bdf8', fontSize: '14px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <User size={15} /> {activeUser.name || activeUser.email}
+                  </div>
                   <button 
                     className="drawer-link" 
                     onClick={() => handleLinkClick(activeUser.role !== 'donor' ? 'crm_dashboard' : 'donor_dashboard')}
                   >
-                    Go to Dashboard ({activeUser.name})
+                    Go to Dashboard
                   </button>
-                  <button className="drawer-link" onClick={handleLogout} style={{ color: '#ef4444' }}>
-                    Logout Account
+                  <button 
+                    className="drawer-link" 
+                    id="mobile-drawer-sign-out-btn"
+                    onClick={handleLogout} 
+                    style={{ color: '#ef4444', display: 'flex', alignItems: 'center', gap: '6px' }}
+                  >
+                    <LogOut size={15} /> Sign Out
                   </button>
                 </>
               ) : (
-                <button className="drawer-link" onClick={() => handleLinkClick('donor_portal_login')}>
-                  Donor Account Login
-                </button>
+                <>
+                  <button className="drawer-link" id="mobile-drawer-signin-btn" onClick={() => handleLinkClick('signin')}>
+                    Sign In
+                  </button>
+                  <button className="drawer-link" id="mobile-drawer-signup-btn" onClick={() => handleLinkClick('signup')} style={{ color: 'var(--accent)' }}>
+                    Create Account
+                  </button>
+                </>
               )}
 
               <button 

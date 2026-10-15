@@ -256,8 +256,8 @@ export interface CelebrationBooking {
   razorpay_order_id?: string;
   order_id?: string;
   payment_status: 'pending' | 'successful' | 'failed';
-  booking_status: 'confirmed' | 'banner_printed' | 'completed' | 'cancelled';
-  status?: 'confirmed' | 'banner_printed' | 'completed' | 'cancelled';
+  booking_status: 'pending' | 'confirmed' | 'banner_printed' | 'completed' | 'cancelled';
+  status?: 'pending' | 'confirmed' | 'banner_printed' | 'completed' | 'cancelled';
   notes?: string;
   special_instructions?: string;
   created_at: string;
@@ -1704,32 +1704,139 @@ class MockDbEngine {
   }
 
   // ----------------------------------------------------
-  // ADMIN USER MANAGEMENT
+  // USER & ADMIN USER MANAGEMENT (FULL ERROR-FREE CRUD)
   // ----------------------------------------------------
-  public createSubAdmin(name: string, email: string, phone: string, permissions: string[]) {
-    // Create base user first
+  public createUser(userData: {
+    name: string;
+    email: string;
+    phone?: string;
+    role?: 'donor' | 'sub_admin' | 'super_admin';
+    status?: 'active' | 'suspended';
+    permissions?: string[];
+  }): User {
+    const cleanEmail = userData.email.trim().toLowerCase();
+    const existing = this.db.users.find(u => u.email.toLowerCase() === cleanEmail);
+    if (existing) {
+      existing.name = userData.name.trim();
+      if (userData.phone !== undefined) existing.phone = userData.phone;
+      if (userData.role) existing.role = userData.role;
+      if (userData.status) existing.status = userData.status;
+      if (userData.permissions && this.db.admin_users[existing.id]) {
+        this.db.admin_users[existing.id].permissions = userData.permissions;
+      }
+      this.save();
+      return existing;
+    }
+
     const uId = `usr-${Date.now()}`;
-    const user: User = {
+    const newUser: User = {
       id: uId,
+      name: userData.name.trim(),
+      email: cleanEmail,
+      phone: userData.phone || undefined,
+      role: userData.role || 'donor',
+      status: userData.status || 'active',
+      created_at: new Date().toISOString(),
+      permissions: userData.permissions || (userData.role === 'super_admin' ? [
+        'donations', 'donors', 'volunteers', 'beneficiaries', 'campaigns', 'events', 'content', 'reports', 'settings', 'admins', 'logs'
+      ] : undefined)
+    };
+    this.db.users.unshift(newUser);
+
+    if (newUser.role === 'sub_admin' || newUser.role === 'super_admin') {
+      this.db.admin_users[uId] = {
+        id: uId,
+        permissions: userData.permissions || (newUser.role === 'super_admin' ? [
+          'donations', 'donors', 'volunteers', 'beneficiaries', 'campaigns', 'events', 'content', 'reports', 'settings', 'admins', 'logs'
+        ] : ['donations', 'donors', 'volunteers', 'events']),
+        status: newUser.status
+      };
+    }
+
+    if (newUser.role === 'donor') {
+      const donorExists = this.db.donors.some(d => d.email.toLowerCase() === cleanEmail);
+      if (!donorExists) {
+        this.db.donors.unshift({
+          id: `dn-${Date.now()}`,
+          user_id: uId,
+          name: newUser.name,
+          email: cleanEmail,
+          phone: newUser.phone,
+          donor_type: 'New Donor',
+          created_at: new Date().toISOString()
+        });
+      }
+    }
+
+    this.logAudit('created_user', 'Users', cleanEmail, null, newUser);
+    this.save();
+    return newUser;
+  }
+
+  public getUserById(uId: string): User | undefined {
+    const user = this.db.users.find(u => u.id === uId);
+    if (!user) return undefined;
+    const admin = this.db.admin_users[uId];
+    return {
+      ...user,
+      permissions: admin?.permissions || user.permissions || []
+    };
+  }
+
+  public updateUser(uId: string, updates: Partial<User>): User | null {
+    const user = this.db.users.find(u => u.id === uId);
+    if (!user) return null;
+    const oldUser = { ...user };
+
+    if (updates.name) user.name = updates.name.trim();
+    if (updates.email) user.email = updates.email.trim().toLowerCase();
+    if (updates.phone !== undefined) user.phone = updates.phone;
+    if (updates.role) user.role = updates.role;
+    if (updates.status) user.status = updates.status;
+
+    if (updates.permissions && this.db.admin_users[uId]) {
+      this.db.admin_users[uId].permissions = updates.permissions;
+      user.permissions = updates.permissions;
+    }
+
+    // Also sync donors list if user is a donor
+    const matchingDonor = this.db.donors.find(d => d.user_id === uId || d.email.toLowerCase() === user.email.toLowerCase());
+    if (matchingDonor) {
+      if (updates.name) matchingDonor.name = updates.name.trim();
+      if (updates.email) matchingDonor.email = updates.email.trim().toLowerCase();
+      if (updates.phone !== undefined) matchingDonor.phone = updates.phone;
+    }
+
+    this.logAudit('updated_user', 'Users', user.email, oldUser, user);
+    this.save();
+    return user;
+  }
+
+  public deleteUser(uId: string): boolean {
+    const user = this.db.users.find(u => u.id === uId);
+    if (user && user.role !== 'super_admin') {
+      this.db.users = this.db.users.filter(u => u.id !== uId);
+      delete this.db.admin_users[uId];
+      // Unlink donor user_id
+      this.db.donors.forEach(d => {
+        if (d.user_id === uId) d.user_id = undefined as any;
+      });
+      this.logAudit('deleted_user', 'Users', user.email, user, null);
+      this.save();
+      return true;
+    }
+    return false;
+  }
+
+  public createSubAdmin(name: string, email: string, phone: string, permissions: string[]) {
+    return this.createUser({
       name,
       email,
       phone,
       role: 'sub_admin',
       status: 'active',
-      created_at: new Date().toISOString()
-    };
-    this.db.users.push(user);
-
-    // Add admin record
-    this.db.admin_users[uId] = {
-      id: uId,
-      permissions,
-      status: 'active'
-    };
-
-    this.logAudit('created_sub_admin', 'Admins', email, null, { user, permissions });
-    this.save();
-    return user;
+      permissions
+    });
   }
 
   public updateSubAdminPermissions(uId: string, permissions: string[]) {
@@ -1747,41 +1854,22 @@ class MockDbEngine {
     if (user && (user.role === 'sub_admin' || user.role === 'super_admin')) {
       const old = user.status;
       user.status = old === 'active' ? 'suspended' : 'active';
-      this.logAudit('toggle_admin_active_state', 'Admins', user.email, { status: old }, { status: user.status });
-      this.save();
-    }
-  }
-
-  public updateSubAdmin(uId: string, data: { name?: string; email?: string; phone?: string; role?: 'sub_admin' | 'super_admin'; permissions?: string[]; status?: 'active' | 'suspended' }) {
-    const user = this.db.users.find(u => u.id === uId);
-    if (user) {
-      const oldUser = { ...user };
-      if (data.name) user.name = data.name;
-      if (data.email) user.email = data.email;
-      if (data.phone !== undefined) user.phone = data.phone;
-      if (data.role) user.role = data.role;
-      if (data.status) user.status = data.status;
-
-      if (data.permissions && this.db.admin_users[uId]) {
-        this.db.admin_users[uId].permissions = data.permissions;
+      if (this.db.admin_users[uId]) {
+        this.db.admin_users[uId].status = user.status;
       }
-      this.logAudit('updated_sub_admin', 'Admins', user.email, oldUser, user);
+      this.logAudit('toggle_admin_active_state', 'Admins', user.email, { status: old }, { status: user.status });
       this.save();
       return user;
     }
     return null;
   }
 
+  public updateSubAdmin(uId: string, data: { name?: string; email?: string; phone?: string; role?: 'sub_admin' | 'super_admin'; permissions?: string[]; status?: 'active' | 'suspended' }) {
+    return this.updateUser(uId, data);
+  }
+
   public deleteSubAdmin(uId: string) {
-    const user = this.db.users.find(u => u.id === uId);
-    if (user && user.role !== 'super_admin') {
-      this.db.users = this.db.users.filter(u => u.id !== uId);
-      delete this.db.admin_users[uId];
-      this.logAudit('deleted_sub_admin', 'Admins', user.email, user, null);
-      this.save();
-      return true;
-    }
-    return false;
+    return this.deleteUser(uId);
   }
 
   // GALLERY CRUD METHODS (GOOGLE DRIVE INTEGRATION)
