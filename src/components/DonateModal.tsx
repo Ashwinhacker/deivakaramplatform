@@ -4,7 +4,8 @@ import {
   Key, Mail, Phone, Lock, UserCheck, Heart, ArrowRight, ShieldCheck, 
   QrCode, ExternalLink, Cake, Video, Home as HomeIcon, Baby, PawPrint, 
   Calendar, Upload, Camera, Share2, MessageCircle, Send, AlertTriangle, 
-  Check, RotateCcw, Download, Eye, FileText, CheckCircle, Copy
+  Check, RotateCcw, Download, Eye, EyeOff, FileText, CheckCircle, Copy,
+  RefreshCw
 } from 'lucide-react';
 import { 
   createDonation, createOrUpdateDonor, getDonors, getCampaigns, getSettings, 
@@ -15,6 +16,7 @@ import { supabase, isSupabaseConfigured } from '../db/supabaseClient';
 import { ReceiptPDF } from './ReceiptPDF';
 import { DONATION_PROGRAMS, BIRTHDAY_ADDONS, type DonationProgram } from '../data/donationPrograms';
 import { initiateRazorpayPayment } from '../utils/razorpay';
+import { signInUser, registerUser, resendVerificationEmail } from '../utils/authService';
 
 interface DonateModalProps {
   onClose: () => void;
@@ -39,13 +41,27 @@ export const DonateModal: React.FC<DonateModalProps> = ({
   const [newUserPhone, setNewUserPhone] = useState('');
   const [newUserEmail, setNewUserEmail] = useState('');
 
-  // Existing donor authentication gate state
-  const [loginMethod, setLoginMethod] = useState<'new_user' | 'credentials' | 'otp'>('new_user');
+  // Donor authentication gate state: 'new_user' | 'credentials' | 'signup' | 'check_email'
+  const [loginMethod, setLoginMethod] = useState<'new_user' | 'credentials' | 'signup' | 'check_email'>('new_user');
   const [loginEmail, setLoginEmail] = useState('');
-  const [loginPhone, setLoginPhone] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
-  const [otpCode, setOtpCode] = useState('');
-  const [otpSent, setOtpSent] = useState(false);
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
+
+  // Sign Up form states for normal account creation
+  const [signUpName, setSignUpName] = useState('');
+  const [signUpEmail, setSignUpEmail] = useState('');
+  const [signUpPhone, setSignUpPhone] = useState('');
+  const [signUpPassword, setSignUpPassword] = useState('');
+  const [signUpConfirmPassword, setSignUpConfirmPassword] = useState('');
+  const [showSignUpPassword, setShowSignUpPassword] = useState(false);
+  const [verificationNotice, setVerificationNotice] = useState<string | null>(null);
+
+  // Resend Verification states for modal
+  const [resendCountdown, setResendCountdown] = useState(60);
+  const [canResend, setCanResend] = useState(false);
+  const [isResending, setIsResending] = useState(false);
+  const [resendSuccess, setResendSuccess] = useState<string | null>(null);
+
   const [authError, setAuthError] = useState<string | null>(null);
   const [isAuthProcessing, setIsAuthProcessing] = useState(false);
 
@@ -491,74 +507,35 @@ export const DonateModal: React.FC<DonateModalProps> = ({
     }
   };
 
-  // 2. Credentials Login (Real Supabase Auth)
+  // 2. Credentials Login (Real Supabase Auth supporting Email or Mobile)
   const handleCredentialsLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError(null);
-    if (!loginEmail || !loginPassword) {
-      setAuthError('Please provide both email and password.');
+    if (!loginEmail.trim() || !loginPassword) {
+      setAuthError('Please provide your email/mobile and password.');
       return;
     }
 
     setIsAuthProcessing(true);
-    const cleanEmail = loginEmail.trim().toLowerCase();
-
     try {
-      if (isSupabaseConfigured) {
-        const { data, error } = await supabase.auth.signInWithPassword({
-          email: cleanEmail,
-          password: loginPassword
-        });
+      const res = await signInUser({
+        identifier: loginEmail.trim(),
+        password: loginPassword
+      });
 
-        if (error) {
-          // If auth password check fails, check if donor profile exists in Supabase donors table
-          const donors = await getDonors();
-          const matched = donors.find(d => d.email.toLowerCase() === cleanEmail);
-          if (matched && loginPassword === 'password') {
-            completeDonorAuth({
-              id: matched.id,
-              name: matched.name,
-              email: matched.email,
-              phone: matched.phone,
-              pan: matched.pan
-            });
-            return;
-          }
-          throw error;
-        }
-
-        if (data?.user) {
-          // Fetch synced donor profile from public.donors
-          const { data: donor } = await supabase
-            .from('donors')
-            .select('*')
-            .or(`user_id.eq.${data.user.id},email.eq.${cleanEmail}`)
-            .maybeSingle();
-
-          completeDonorAuth({
-            id: donor?.id || data.user.id,
-            name: donor?.name || data.user.user_metadata?.name || cleanEmail.split('@')[0],
-            email: cleanEmail,
-            phone: donor?.phone || data.user.user_metadata?.phone,
-            pan: donor?.pan
-          });
-          return;
-        }
-      } else {
-        const donors = await getDonors();
-        const matched = donors.find(d => d.email.toLowerCase() === cleanEmail);
-        if (matched) {
-          completeDonorAuth({
-            id: matched.id,
-            name: matched.name,
-            email: matched.email,
-            phone: matched.phone,
-            pan: matched.pan
-          });
-          return;
-        }
-        throw new Error('Invalid email or password.');
+      if (!res.success) {
+        setAuthError(res.error || 'Invalid credentials.');
+        return;
       }
+
+      completeDonorAuth({
+        id: res.user.id,
+        name: res.user.name,
+        email: res.user.email,
+        phone: res.user.phone,
+        pan: res.user.pan,
+        address: res.user.address
+      });
     } catch (err: any) {
       setAuthError(err.message || 'Invalid credentials. Please verify your email and password.');
     } finally {
@@ -566,55 +543,140 @@ export const DonateModal: React.FC<DonateModalProps> = ({
     }
   };
 
-  // 3. OTP Verification
-  const handleSendOtp = () => {
-    if (!loginPhone && !loginEmail) {
-      setAuthError('Enter your mobile number or email to receive a secure OTP code.');
-      return;
-    }
-    setAuthError(null);
-    setIsAuthProcessing(true);
-    setTimeout(() => {
-      setIsAuthProcessing(false);
-      setOtpSent(true);
-    }, 300);
-  };
-
-  const handleVerifyOtp = async (e: React.FormEvent) => {
+  // 3. Normal Account Creation (Standard Supabase Auth with Verification Email)
+  const handleNormalSignUp = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError(null);
-    if (!otpCode || (otpCode.trim() !== '123456' && otpCode.trim().length !== 6)) {
-      setAuthError('Please enter the 6-digit verification code.');
+
+    const cleanName = signUpName.trim();
+    if (!cleanName || cleanName.length < 2) {
+      setAuthError('Please enter your full name (at least 2 characters).');
+      return;
+    }
+
+    const cleanEmail = signUpEmail.trim().toLowerCase();
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!cleanEmail || !emailRegex.test(cleanEmail)) {
+      setAuthError('Please enter a valid email address so Supabase can send your verification email.');
+      return;
+    }
+
+    if (!signUpPassword || signUpPassword.length < 6) {
+      setAuthError('Password must be at least 6 characters long.');
+      return;
+    }
+
+    if (signUpPassword !== signUpConfirmPassword) {
+      setAuthError('Passwords do not match. Please verify your password confirmation.');
       return;
     }
 
     setIsAuthProcessing(true);
     try {
-      const cleanEmail = loginEmail ? loginEmail.trim().toLowerCase() : (loginPhone ? `${loginPhone.replace(/[^0-9]/g, '')}@donor.deivakaram.org` : 'verified.donor@gmail.com');
-      const donor = await createOrUpdateDonor({
-        name: cleanEmail.split('@')[0],
+      const res = await registerUser({
+        name: cleanName,
         email: cleanEmail,
-        phone: loginPhone || undefined,
-        donor_type: 'Regular Donor'
+        phone: signUpPhone.trim() || undefined,
+        password: signUpPassword,
+        confirmPassword: signUpConfirmPassword
       });
 
-      completeDonorAuth({
-        id: donor.id,
-        name: donor.name,
-        email: donor.email,
-        phone: donor.phone || loginPhone
-      });
-    } catch (err) {
-      completeDonorAuth({
-        id: `usr-otp-${Date.now()}`,
-        name: loginEmail ? loginEmail.split('@')[0] : 'Verified Donor',
-        email: loginEmail || 'verified.donor@gmail.com',
-        phone: loginPhone || '+91 98401 23456'
-      });
+      if (!res.success) {
+        setAuthError(res.error || 'Failed to create account.');
+        return;
+      }
+
+      if (res.user) {
+        // Direct session returned (e.g. if email confirmation is disabled in Supabase)
+        completeDonorAuth({
+          id: res.user.id,
+          name: res.user.name,
+          email: res.user.email,
+          phone: res.user.phone
+        });
+      } else if (res.needsEmailVerification) {
+        // Verification email dispatched by Supabase -> Transition to dedicated "Check Mail" screen
+        setVerificationNotice(res.message || `A verification link has been sent to ${cleanEmail}. Please check your email.`);
+        setLoginMethod('check_email');
+        setResendCountdown(60);
+        setCanResend(false);
+        setResendSuccess(null);
+      }
+    } catch (err: any) {
+      setAuthError(err.message || 'An error occurred during account creation.');
     } finally {
       setIsAuthProcessing(false);
     }
   };
+
+  // Resend verification email inside DonateModal
+  const handleResendInModal = async () => {
+    if (!signUpEmail || !canResend || isResending) return;
+    setIsResending(true);
+    setResendSuccess(null);
+    setAuthError(null);
+    try {
+      const res = await resendVerificationEmail(signUpEmail.trim());
+      if (res.success) {
+        setResendCountdown(60);
+        setCanResend(false);
+        setResendSuccess(`Fresh verification link dispatched to ${signUpEmail.trim()}. Please check your inbox and spam folder.`);
+      } else {
+        setAuthError(res.error || 'Failed to resend verification link.');
+      }
+    } catch (err: any) {
+      setAuthError(err.message || 'Failed to resend verification link.');
+    } finally {
+      setIsResending(false);
+    }
+  };
+
+  // Countdown timer and auto-redirect listener when user verifies
+  useEffect(() => {
+    if (loginMethod !== 'check_email') return;
+
+    const timer = setInterval(() => {
+      setResendCountdown(prev => {
+        if (prev <= 1) {
+          setCanResend(true);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    const checkVerified = () => {
+      const active = localStorage.getItem('deivakaram_active_user');
+      if (active) {
+        onClose();
+        if (onNavigate) {
+          onNavigate('home');
+        } else {
+          window.location.href = '/?verified=true';
+        }
+      }
+    };
+
+    window.addEventListener('auth-changed', checkVerified);
+    window.addEventListener('storage', checkVerified);
+
+    let authSub: any = null;
+    if (isSupabaseConfigured) {
+      const { data } = supabase.auth.onAuthStateChange((event, session) => {
+        if (event === 'SIGNED_IN' && session?.user) {
+          checkVerified();
+        }
+      });
+      authSub = data?.subscription;
+    }
+
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('auth-changed', checkVerified);
+      window.removeEventListener('storage', checkVerified);
+      if (authSub) authSub.unsubscribe();
+    };
+  }, [loginMethod, onClose, onNavigate]);
 
 
   const handleLogoutDonor = () => {
@@ -748,90 +810,43 @@ export const DonateModal: React.FC<DonateModalProps> = ({
 
       let paymentId = '';
       let paymentMethodUsed = 'Razorpay';
-
-      if (directMethod === 'DirectUPI') {
-        const cleanUtr = upiUtr.trim() || `UPI-DIRECT-${Date.now()}`;
-        paymentId = cleanUtr;
-        paymentMethodUsed = 'UPI';
-      } else if (directMethod === 'DirectBank') {
-        const cleanBankRef = bankRef.trim() || `NEFT-DVK-${Date.now().toString().slice(-8)}`;
-        paymentId = cleanBankRef;
-        paymentMethodUsed = 'Bank Transfer';
-      } else if (directMethod === 'DirectCard') {
-        const last4 = cardNumber.replace(/\s+/g, '').slice(-4) || '1928';
-        paymentId = `CARD-AUTH-${last4}-${Date.now().toString().slice(-6)}`;
-        paymentMethodUsed = 'Credit Card';
-      } else {
-        // Launch Razorpay Payment
-        const rzpResult = await initiateRazorpayPayment({
-          keyId: settings?.paymentApiKey,
-          amount: currentTotalAmount,
-          name: 'DEIVAKARAM CHARITABLE TRUST',
-          description: isCelebrationPkg 
-            ? `Celebration Sponsorship: ${celebrantName || 'Special Milestone'} (${selectedProgram.name})` 
-            : `${selectedProgram.name} Contribution`,
-          prefill: {
-            name: isAnonymous ? 'Anonymous Donor' : name,
-            email: email || 'donor@deivakaram.org',
-            contact: phone || '9876543210'
-          },
-          notes: {
-            package_id: selectedProgram.id,
-            celebrant_name: celebrantName || '',
-            occasion_date: occasionDate || '',
-            is_virtual: isVirtualCelebration ? 'yes' : 'no'
-          },
-          simulateFailure: false
-        });
-        paymentId = rzpResult.razorpay_payment_id;
-        paymentMethodUsed = payMethod === 'Card' ? 'Credit Card' : payMethod === 'NetBanking' ? 'Net Banking' : 'Razorpay';
-      }
+      let paymentStatus: 'successful' | 'pending' = 'successful';
 
       // Dedication note if filled
       const extraNote = celebrantName || occasionDate 
         ? `[Occasion: ${celebrantName || 'Special Day'} (${occasionType}) on ${occasionDate} | Virtual: ${isVirtualCelebration ? `Yes (${virtualTimeSlot})` : 'No'}] ${message}`.trim()
         : message;
 
-      // 1. Record in Donations Table
-      const createdResult = await createDonation({
-        name: isAnonymous ? 'Anonymous Donor' : name,
-        email: email || 'donor@deivakaram.org',
-        phone,
-        address,
-        pan,
-        amount: currentTotalAmount,
-        purpose: finalPurpose,
-        plan: finalPlanStr,
-        campaign_id: campaignId || undefined,
-        payment_method: paymentMethodUsed,
-        transaction_id: paymentId,
-        is_anonymous: isAnonymous,
-        message: extraNote,
-        status: 'successful'
-      });
+      let rzpVerifiedResult: any = null;
 
-      const currentDonation: Donation = (createdResult as any).donation || createdResult;
-      const currentDonor: Donor = (createdResult as any).donor || {
-        id: currentDonation.donor_id || `dn-${Date.now()}`,
-        name: isAnonymous ? 'Anonymous Donor' : name,
-        email: email || 'donor@deivakaram.org',
-        phone,
-        address,
-        pan,
-        donor_type: 'New Donor',
-        created_at: new Date().toISOString()
-      };
+      if (directMethod === 'DirectUPI') {
+        const cleanUtr = upiUtr.trim();
+        if (!cleanUtr) {
+          throw new Error('Please enter the 12-digit UPI Transaction ID / UTR after transferring the funds.');
+        }
+        paymentId = cleanUtr;
+        paymentMethodUsed = 'UPI (Direct QR)';
+        paymentStatus = 'pending'; // Offline manual transfer requires admin reconciliation
+      } else if (directMethod === 'DirectBank') {
+        const cleanBankRef = bankRef.trim();
+        if (!cleanBankRef) {
+          throw new Error('Please enter the Bank UTR / Transaction Reference number after completing the transfer.');
+        }
+        paymentId = cleanBankRef;
+        paymentMethodUsed = 'Bank Transfer (NEFT/RTGS/IMPS)';
+        paymentStatus = 'pending'; // Offline manual transfer requires admin reconciliation
+      } else {
+        // Real Razorpay Checkout flow (supports Cards, NetBanking, UPI, Wallets)
+        const donationDataPayload = {
+          amount: currentTotalAmount,
+          purpose: finalPurpose,
+          plan: finalPlanStr,
+          campaign_id: campaignId || null,
+          is_anonymous: isAnonymous,
+          message: extraNote
+        };
 
-      // 2. If celebration package, record in Celebration Bookings Table
-      let newBooking: CelebrationBooking | null = null;
-      if (isCelebrationPkg) {
-        const seq = Math.floor(100000 + Math.random() * 900000).toString();
-        const bookingId = `DVK-CEL-${new Date().getFullYear()}-${seq}`;
-
-        newBooking = await createCelebrationBooking({
-          booking_id: bookingId,
-          donor_id: currentDonation.donor_id || currentDonor.id,
-          donation_id: currentDonation.id,
+        const bookingDataPayload = isCelebrationPkg ? {
           customer_name: isAnonymous ? 'Anonymous Donor' : name,
           customer_phone: phone,
           customer_email: email || 'donor@deivakaram.org',
@@ -841,7 +856,7 @@ export const DonateModal: React.FC<DonateModalProps> = ({
           banner_photo_url: bannerPhoto || '',
           banner_photo_name: bannerPhotoName || 'celebration_banner.jpg',
           is_virtual: isVirtualCelebration,
-          virtual_time_slot: isVirtualCelebration ? virtualTimeSlot : undefined,
+          virtual_time_slot: isVirtualCelebration ? virtualTimeSlot : null,
           food_count: selectedProgram.id === 'birthday_anniversary' ? bdayMealsCount : virtualMealsCount,
           package_id: selectedProgram.id,
           package_name: selectedProgram.name,
@@ -858,12 +873,135 @@ export const DonateModal: React.FC<DonateModalProps> = ({
               };
             }),
           total_amount: currentTotalAmount,
-          razorpay_payment_id: paymentId,
-          razorpay_order_id: paymentId,
-          payment_status: 'successful',
-          booking_status: 'confirmed',
-          notes: message
+          notes: message || null
+        } : null;
+
+        const rzpResult = await initiateRazorpayPayment({
+          keyId: settings?.paymentApiKey,
+          amount: currentTotalAmount,
+          name: 'DEIVAKARAM CHARITABLE TRUST',
+          description: isCelebrationPkg 
+            ? `Celebration Sponsorship: ${celebrantName || 'Special Milestone'} (${selectedProgram.name})` 
+            : `${selectedProgram.name} Contribution`,
+          item_type: isCelebrationPkg ? 'celebration_package' : (campaignId ? 'campaign' : 'donation'),
+          item_id: selectedProgram.id,
+          selected_addons: selectedAddons,
+          food_count: selectedProgram.id === 'birthday_anniversary' ? bdayMealsCount : virtualMealsCount,
+          donation_data: donationDataPayload,
+          booking_data: bookingDataPayload,
+          prefill: {
+            name: isAnonymous ? 'Anonymous Donor' : name,
+            email: email || 'donor@deivakaram.org',
+            contact: phone || '9876543210'
+          },
+          notes: {
+            package_id: selectedProgram.id,
+            celebrant_name: celebrantName || '',
+            occasion_date: occasionDate || '',
+            is_virtual: isVirtualCelebration ? 'yes' : 'no'
+          },
+          simulateFailure: false
         });
+
+        rzpVerifiedResult = rzpResult;
+        paymentId = rzpResult.razorpay_payment_id;
+        paymentMethodUsed = 'Razorpay';
+        paymentStatus = 'successful';
+      }
+
+      // 1. Record / Obtain Donation
+      let currentDonation: Donation;
+      let currentDonor: Donor;
+
+      if (rzpVerifiedResult?.donation) {
+        currentDonation = rzpVerifiedResult.donation;
+        currentDonor = {
+          id: currentDonation.donor_id || `dn-${Date.now()}`,
+          name: isAnonymous ? 'Anonymous Donor' : name,
+          email: email || 'donor@deivakaram.org',
+          phone,
+          address,
+          pan,
+          donor_type: 'New Donor',
+          created_at: new Date().toISOString()
+        };
+      } else {
+        const createdResult = await createDonation({
+          name: isAnonymous ? 'Anonymous Donor' : name,
+          email: email || 'donor@deivakaram.org',
+          phone,
+          address,
+          pan,
+          amount: currentTotalAmount,
+          purpose: finalPurpose,
+          plan: finalPlanStr,
+          campaign_id: campaignId || undefined,
+          payment_method: paymentMethodUsed,
+          transaction_id: paymentId,
+          is_anonymous: isAnonymous,
+          message: extraNote,
+          status: paymentStatus
+        });
+
+        currentDonation = (createdResult as any).donation || createdResult;
+        currentDonor = (createdResult as any).donor || {
+          id: currentDonation.donor_id || `dn-${Date.now()}`,
+          name: isAnonymous ? 'Anonymous Donor' : name,
+          email: email || 'donor@deivakaram.org',
+          phone,
+          address,
+          pan,
+          donor_type: 'New Donor',
+          created_at: new Date().toISOString()
+        };
+      }
+
+      // 2. If celebration package, record or obtain Celebration Booking
+      let newBooking: CelebrationBooking | null = null;
+      if (isCelebrationPkg) {
+        if (rzpVerifiedResult?.booking) {
+          newBooking = rzpVerifiedResult.booking;
+        } else {
+          const seq = Math.floor(100000 + Math.random() * 900000).toString();
+          const bookingId = `DVK-CEL-${new Date().getFullYear()}-${seq}`;
+
+          newBooking = await createCelebrationBooking({
+            booking_id: bookingId,
+            donor_id: currentDonation.donor_id || currentDonor.id,
+            donation_id: currentDonation.id,
+            customer_name: isAnonymous ? 'Anonymous Donor' : name,
+            customer_phone: phone,
+            customer_email: email || 'donor@deivakaram.org',
+            celebrant_name: celebrantName || name,
+            occasion_type: occasionType || 'Birthday',
+            occasion_date: occasionDate || new Date().toISOString().split('T')[0],
+            banner_photo_url: bannerPhoto || '',
+            banner_photo_name: bannerPhotoName || 'celebration_banner.jpg',
+            is_virtual: isVirtualCelebration,
+            virtual_time_slot: isVirtualCelebration ? virtualTimeSlot : undefined,
+            food_count: selectedProgram.id === 'birthday_anniversary' ? bdayMealsCount : virtualMealsCount,
+            package_id: selectedProgram.id,
+            package_name: selectedProgram.name,
+            cake_details: selectedAddons['photo_cake'] ? '1kg Photo Cake' : `${bdayCakeKg}kg Cake`,
+            selected_addons: Object.entries(selectedAddons)
+              .filter(([_, sel]) => sel)
+              .map(([addonId]) => {
+                const addon = availableAddons.find(a => a.id === addonId);
+                return {
+                  id: addonId,
+                  name: addon?.name || addonId,
+                  quantity: 1,
+                  amount: addon?.price || 0
+                };
+              }),
+            total_amount: currentTotalAmount,
+            razorpay_payment_id: paymentId,
+            razorpay_order_id: rzpVerifiedResult?.razorpay_order_id || paymentId,
+            payment_status: paymentStatus,
+            booking_status: paymentStatus === 'successful' ? 'confirmed' : 'pending',
+            notes: message
+          });
+        }
         setConfirmedBooking(newBooking);
       }
 
@@ -1018,22 +1156,31 @@ Contact Trust Office: ${settings?.orgPhone || '+91 44 2449 1122'}`;
                 className={`login-mode-tab ${loginMethod === 'new_user' ? 'active' : ''}`}
                 onClick={() => { setLoginMethod('new_user'); setAuthError(null); }}
               >
-                ⚡ New Donor (Quick)
+                ⚡ Quick Donation
               </button>
               <button
                 type="button"
                 className={`login-mode-tab ${loginMethod === 'credentials' ? 'active' : ''}`}
                 onClick={() => { setLoginMethod('credentials'); setAuthError(null); }}
               >
-                Password Login
+                Sign In
               </button>
               <button
                 type="button"
-                className={`login-mode-tab ${loginMethod === 'otp' ? 'active' : ''}`}
-                onClick={() => { setLoginMethod('otp'); setAuthError(null); }}
+                className={`login-mode-tab ${loginMethod === 'signup' ? 'active' : ''}`}
+                onClick={() => { setLoginMethod('signup'); setAuthError(null); }}
               >
-                OTP Verification
+                Create Account
               </button>
+              {loginMethod === 'check_email' && (
+                <button
+                  type="button"
+                  className="login-mode-tab active"
+                  style={{ background: '#0A4A9C', color: 'white' }}
+                >
+                  ✉️ Check Mail
+                </button>
+              )}
             </div>
 
             {authError && (
@@ -1048,10 +1195,10 @@ Contact Trust Office: ${settings?.orgPhone || '+91 44 2449 1122'}`;
                 <div className="new-user-card-highlight">
                   <div className="new-user-badge">⚡ Recommended for Instant Donation</div>
                   <h3 style={{ margin: '0 0 6px 0', fontSize: '16px', color: 'var(--primary)' }}>
-                    Quick Log In as New User
+                    Quick Donation (Guest Checkout)
                   </h3>
                   <p style={{ margin: '0 0 16px 0', fontSize: '13px', color: 'var(--text-muted)' }}>
-                    Enter your name and contact details to proceed immediately to donation selection.
+                    Enter your name and contact details to proceed immediately without creating a password.
                   </p>
 
                   <form onSubmit={handleNewUserQuickLogin}>
@@ -1063,7 +1210,7 @@ Contact Trust Office: ${settings?.orgPhone || '+91 44 2449 1122'}`;
                         type="text"
                         className="form-control"
                         required
-                        placeholder="Enter your name"
+                        placeholder="Enter your full name"
                         value={newUserName}
                         onChange={(e) => setNewUserName(e.target.value)}
                       />
@@ -1111,15 +1258,15 @@ Contact Trust Office: ${settings?.orgPhone || '+91 44 2449 1122'}`;
               </div>
             )}
 
-            {/* TAB 2: PASSWORD LOGIN */}
+            {/* TAB 2: NORMAL SIGN IN WITH PASSWORD */}
             {loginMethod === 'credentials' && (
               <form onSubmit={handleCredentialsLogin} className="login-form-pane">
                 <div className="form-group">
-                  <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><Mail size={14} /> Email Address *</label>
+                  <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><Mail size={14} /> Registered Email or Mobile *</label>
                   <input
-                    type="email"
+                    type="text"
                     className="form-control"
-                    placeholder="donor@example.com"
+                    placeholder="donor@example.com or 9876543210"
                     required
                     value={loginEmail}
                     onChange={(e) => setLoginEmail(e.target.value)}
@@ -1128,73 +1275,258 @@ Contact Trust Office: ${settings?.orgPhone || '+91 44 2449 1122'}`;
 
                 <div className="form-group">
                   <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><Lock size={14} /> Password *</label>
-                  <input
-                    type="password"
-                    className="form-control"
-                    placeholder="Enter your password"
-                    required
-                    value={loginPassword}
-                    onChange={(e) => setLoginPassword(e.target.value)}
-                  />
+                  <div style={{ position: 'relative' }}>
+                    <input
+                      type={showLoginPassword ? 'text' : 'password'}
+                      className="form-control"
+                      placeholder="Enter your password"
+                      required
+                      value={loginPassword}
+                      onChange={(e) => setLoginPassword(e.target.value)}
+                      style={{ paddingRight: '40px' }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowLoginPassword(!showLoginPassword)}
+                      style={{ position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: 'var(--text-light)', cursor: 'pointer' }}
+                      aria-label="Toggle password"
+                    >
+                      {showLoginPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                    </button>
+                  </div>
                 </div>
 
                 <button type="submit" className="btn btn-primary btn-block" disabled={isAuthProcessing}>
-                  {isAuthProcessing ? 'Authenticating...' : 'Sign In & Continue'}
+                  {isAuthProcessing ? <Loader2 className="spinner" size={16} /> : 'Sign In & Continue'}
                 </button>
               </form>
             )}
 
-            {/* TAB 3: OTP VERIFICATION */}
-            {loginMethod === 'otp' && (
-              <div className="login-form-pane">
-                {!otpSent ? (
-                  <div>
-                    <p style={{ fontSize: '13px', color: '#64748b', marginBottom: '14px' }}>
-                      Enter your mobile number or email to receive a secure verification code.
-                    </p>
-                    <div className="form-group">
-                      <label className="form-label">Mobile Number or Email</label>
-                      <input
-                        type="text"
-                        className="form-control"
-                        placeholder="+91 98401 23456 or email@example.com"
-                        value={loginPhone || loginEmail}
-                        onChange={(e) => {
-                          if (e.target.value.includes('@')) {
-                            setLoginEmail(e.target.value);
-                          } else {
-                            setLoginPhone(e.target.value);
-                          }
-                        }}
-                      />
-                    </div>
-                    <button type="button" onClick={handleSendOtp} className="btn btn-primary btn-block" disabled={isAuthProcessing}>
-                      {isAuthProcessing ? 'Sending...' : 'Send Secure OTP'}
-                    </button>
+            {/* TAB 3: NORMAL ACCOUNT CREATION (SUPABASE EMAIL VERIFICATION) */}
+            {loginMethod === 'signup' && (
+              <form onSubmit={handleNormalSignUp} className="login-form-pane">
+                <div className="form-group">
+                  <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <UserCheck size={14} /> Full Name *
+                  </label>
+                  <input
+                    type="text"
+                    className="form-control"
+                    placeholder="e.g. Ramesh Kumar"
+                    required
+                    value={signUpName}
+                    onChange={(e) => setSignUpName(e.target.value)}
+                  />
+                </div>
+
+                <div className="form-row-2">
+                  <div className="form-group">
+                    <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <Mail size={14} /> Email Address *
+                    </label>
+                    <input
+                      type="email"
+                      className="form-control"
+                      placeholder="donor@example.com"
+                      required
+                      value={signUpEmail}
+                      onChange={(e) => setSignUpEmail(e.target.value)}
+                    />
                   </div>
-                ) : (
-                  <form onSubmit={handleVerifyOtp}>
-                    <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', padding: '10px 14px', borderRadius: '8px', marginBottom: '16px', fontSize: '12px', color: '#166534' }}>
-                      ✓ Verification code sent! Enter code to verify.
-                    </div>
-                    <div className="form-group">
-                      <label className="form-label">Enter 6-Digit Code</label>
+                  <div className="form-group">
+                    <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <Phone size={14} /> Mobile (Optional)
+                    </label>
+                    <input
+                      type="tel"
+                      className="form-control"
+                      placeholder="9876543210"
+                      value={signUpPhone}
+                      onChange={(e) => setSignUpPhone(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                <div className="form-row-2">
+                  <div className="form-group">
+                    <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <Lock size={14} /> Password (Min 6 chars) *
+                    </label>
+                    <div style={{ position: 'relative' }}>
                       <input
-                        type="text"
-                        maxLength={6}
-                        required
+                        type={showSignUpPassword ? 'text' : 'password'}
                         className="form-control"
-                        placeholder="123456"
-                        style={{ letterSpacing: '4px', fontSize: '18px', textAlign: 'center', fontWeight: 700 }}
-                        value={otpCode}
-                        onChange={(e) => setOtpCode(e.target.value)}
+                        placeholder="••••••••"
+                        required
+                        minLength={6}
+                        value={signUpPassword}
+                        onChange={(e) => setSignUpPassword(e.target.value)}
+                        style={{ paddingRight: '40px' }}
                       />
+                      <button
+                        type="button"
+                        onClick={() => setShowSignUpPassword(!showSignUpPassword)}
+                        style={{ position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: 'var(--text-light)', cursor: 'pointer' }}
+                        aria-label="Toggle password"
+                      >
+                        {showSignUpPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                      </button>
                     </div>
-                    <button type="submit" className="btn btn-primary btn-block" disabled={isAuthProcessing}>
-                      {isAuthProcessing ? 'Verifying...' : 'Verify Code & Continue'}
-                    </button>
-                  </form>
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <Lock size={14} /> Confirm Password *
+                    </label>
+                    <input
+                      type={showSignUpPassword ? 'text' : 'password'}
+                      className="form-control"
+                      placeholder="••••••••"
+                      required
+                      minLength={6}
+                      value={signUpConfirmPassword}
+                      onChange={(e) => setSignUpConfirmPassword(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                <p style={{ fontSize: '11.5px', color: '#64748b', margin: '4px 0 14px 0' }}>
+                  ✉️ Supabase will send a verification link to your email address.
+                </p>
+
+                <button type="submit" className="btn btn-primary btn-block" disabled={isAuthProcessing}>
+                  {isAuthProcessing ? <Loader2 className="spinner" size={16} /> : 'Create Account & Continue'}
+                </button>
+              </form>
+            )}
+
+            {/* TAB 4: CHECK MAIL FOR VERIFICATION LINK */}
+            {loginMethod === 'check_email' && (
+              <div className="check-email-pane" style={{ textAlign: 'center', padding: '16px 12px' }}>
+                <div style={{
+                  width: '64px',
+                  height: '64px',
+                  borderRadius: '50%',
+                  background: 'linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%)',
+                  border: '2px solid #bfdbfe',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  margin: '0 auto 16px auto',
+                  boxShadow: '0 8px 16px -4px rgba(10, 74, 156, 0.15)'
+                }}>
+                  <Mail size={32} color="#0A4A9C" />
+                </div>
+
+                <h3 style={{ margin: '0 0 8px 0', color: 'var(--text-dark)', fontSize: '20px', fontWeight: 700 }}>
+                  Check Your Mail for Verification Link
+                </h3>
+                <p style={{ fontSize: '13px', color: '#64748b', marginBottom: '14px', lineHeight: 1.5 }}>
+                  Your account has been created in Supabase. We have sent a verification link to:
+                </p>
+
+                <div style={{
+                  background: '#f8fafc',
+                  border: '1px solid #cbd5e1',
+                  borderRadius: '8px',
+                  padding: '10px 16px',
+                  marginBottom: '16px',
+                  fontSize: '14.5px',
+                  fontWeight: 600,
+                  color: '#0A4A9C',
+                  wordBreak: 'break-all'
+                }}>
+                  ✉️ {signUpEmail}
+                </div>
+
+                {resendSuccess && (
+                  <div style={{
+                    background: '#f0fdf4',
+                    border: '1px solid #bbf7d0',
+                    color: '#15803d',
+                    borderRadius: '8px',
+                    padding: '10px 14px',
+                    marginBottom: '14px',
+                    fontSize: '12.5px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '8px',
+                    textAlign: 'left'
+                  }}>
+                    <CheckCircle2 size={16} /> {resendSuccess}
+                  </div>
                 )}
+
+                <div style={{
+                  background: '#eff6ff',
+                  border: '1px solid #bfdbfe',
+                  borderRadius: '10px',
+                  padding: '14px 16px',
+                  marginBottom: '20px',
+                  textAlign: 'left',
+                  fontSize: '12.5px',
+                  color: '#1e3a8a',
+                  lineHeight: 1.6
+                }}>
+                  <div style={{ fontWeight: 600, marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <CheckCircle2 size={15} color="#0A4A9C" /> Next Steps:
+                  </div>
+                  <ol style={{ margin: 0, paddingLeft: '18px' }}>
+                    <li>Open your inbox at <strong>{signUpEmail}</strong></li>
+                    <li>Check your <strong>Inbox</strong> (and <strong>Spam/Junk</strong> folder)</li>
+                    <li>Click the link to verify your account</li>
+                    <li>Once verified, you will automatically be redirected to the Home page!</li>
+                  </ol>
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  <button
+                    type="button"
+                    className="btn btn-outline btn-block"
+                    disabled={!canResend || isResending}
+                    onClick={handleResendInModal}
+                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', padding: '11px' }}
+                  >
+                    <RefreshCw className={isResending ? 'spinner' : ''} size={15} />
+                    {isResending
+                      ? 'Resending Verification Link...'
+                      : canResend
+                        ? 'Resend Verification Link'
+                        : `Resend link available in ${resendCountdown}s`}
+                  </button>
+
+                  <button
+                    type="button"
+                    className="btn btn-primary btn-block"
+                    onClick={() => {
+                      onClose();
+                      if (onNavigate) onNavigate('home');
+                      else window.location.href = '/';
+                    }}
+                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', padding: '11px' }}
+                  >
+                    Go to Home Page <ArrowRight size={16} />
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLoginMethod('credentials');
+                      setLoginEmail(signUpEmail);
+                      setAuthError(null);
+                    }}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      color: 'var(--text-light)',
+                      fontSize: '12.5px',
+                      textDecoration: 'underline',
+                      cursor: 'pointer',
+                      marginTop: '4px'
+                    }}
+                  >
+                    Already clicked the link? Sign In with Password
+                  </button>
+                </div>
               </div>
             )}
           </div>

@@ -6,6 +6,8 @@
 DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
 DROP FUNCTION IF EXISTS public.handle_new_user() CASCADE;
 
+DROP TABLE IF EXISTS public.webhook_events CASCADE;
+DROP TABLE IF EXISTS public.payment_orders CASCADE;
 DROP TABLE IF EXISTS public.audit_logs CASCADE;
 DROP TABLE IF EXISTS public.notifications CASCADE;
 DROP TABLE IF EXISTS public.receipts CASCADE;
@@ -98,8 +100,10 @@ CREATE TABLE IF NOT EXISTS public.donations (
     campaign_id UUID REFERENCES public.campaigns(id) ON DELETE SET NULL,
     amount NUMERIC(12, 2) NOT NULL,
     purpose TEXT NOT NULL,
+    plan TEXT DEFAULT 'One-Time Contribution',
     payment_method TEXT NOT NULL, -- UPI, Credit Card, Debit Card, Net Banking
     transaction_id TEXT UNIQUE NOT NULL,
+    razorpay_order_id TEXT,
     payment_status TEXT NOT NULL CHECK (payment_status IN ('pending', 'processing', 'successful', 'failed', 'refunded', 'cancelled')),
     receipt_number TEXT UNIQUE, -- DVK-REC-XXXXXX
     is_anonymous BOOLEAN DEFAULT FALSE,
@@ -377,9 +381,65 @@ CREATE TABLE IF NOT EXISTS public.success_stories (
 );
 
 --------------------------------------------------------------------------------
--- ROW LEVEL SECURITY (RLS) POLICIES
+-- 21. PAYMENT ORDERS Table (Tracks authoritative gateway orders created server-side)
+-- --------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.payment_orders (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    order_id TEXT UNIQUE NOT NULL, -- Razorpay order ID (order_...)
+    user_id UUID REFERENCES public.users(id) ON DELETE SET NULL,
+    donor_id UUID REFERENCES public.donors(id) ON DELETE SET NULL,
+    amount NUMERIC(12, 2) NOT NULL CHECK (amount > 0),
+    currency TEXT NOT NULL DEFAULT 'INR',
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'paid', 'failed', 'cancelled', 'refunded')),
+    item_type TEXT NOT NULL CHECK (item_type IN ('donation', 'celebration_package', 'campaign', 'general')),
+    item_id TEXT,
+    receipt TEXT,
+    notes JSONB DEFAULT '{}'::JSONB,
+    razorpay_payment_id TEXT,
+    razorpay_signature TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_payment_orders_order_id ON public.payment_orders(order_id);
+CREATE INDEX IF NOT EXISTS idx_payment_orders_donor_id ON public.payment_orders(donor_id);
+CREATE INDEX IF NOT EXISTS idx_payment_orders_status ON public.payment_orders(status);
+
+--------------------------------------------------------------------------------
+-- 22. WEBHOOK EVENTS Table (Idempotent processing of gateway webhooks)
+-- --------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.webhook_events (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    event_id TEXT UNIQUE NOT NULL,
+    event_type TEXT NOT NULL,
+    processed_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL,
+    payload JSONB NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_webhook_events_event_id ON public.webhook_events(event_id);
+
+--------------------------------------------------------------------------------
+-- HELPER FUNCTION: IS ADMIN
+-- --------------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.is_admin()
+RETURNS BOOLEAN AS $$
+BEGIN
+    RETURN EXISTS (
+        SELECT 1 
+        FROM public.users 
+        WHERE (auth_id = auth.uid() OR id = auth.uid()) 
+          AND role IN ('super_admin', 'sub_admin')
+          AND status = 'active'
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER STABLE;
+
+--------------------------------------------------------------------------------
+-- PRODUCTION ROW LEVEL SECURITY (RLS) POLICIES
 --------------------------------------------------------------------------------
 
+ALTER TABLE public.payment_orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.webhook_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.admin_users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.donors ENABLE ROW LEVEL SECURITY;
@@ -401,85 +461,218 @@ ALTER TABLE public.gallery_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.settings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.success_stories ENABLE ROW LEVEL SECURITY;
 
--- 1. Users policies: Allow public insert/select for auth synchronization and CRM management
-CREATE POLICY "Public read users" ON public.users FOR SELECT USING (true);
-CREATE POLICY "Public write users" ON public.users FOR ALL USING (true);
+-- 1. Users policies
+DROP POLICY IF EXISTS "users_select" ON public.users;
+CREATE POLICY "users_select" ON public.users 
+    FOR SELECT USING (auth_id = auth.uid() OR id = auth.uid() OR public.is_admin() OR auth.role() = 'service_role' OR auth.role() = 'authenticated');
+
+DROP POLICY IF EXISTS "users_update" ON public.users;
+CREATE POLICY "users_update" ON public.users 
+    FOR UPDATE USING (auth_id = auth.uid() OR id = auth.uid() OR public.is_admin() OR auth.role() = 'service_role');
+
+DROP POLICY IF EXISTS "users_insert" ON public.users;
+CREATE POLICY "users_insert" ON public.users 
+    FOR INSERT WITH CHECK (true);
+
+DROP POLICY IF EXISTS "users_delete" ON public.users;
+CREATE POLICY "users_delete" ON public.users 
+    FOR DELETE USING (public.is_admin() OR auth.role() = 'service_role');
 
 -- 2. Admin Users policies
-CREATE POLICY "Public read admin_users" ON public.admin_users FOR SELECT USING (true);
-CREATE POLICY "Public write admin_users" ON public.admin_users FOR ALL USING (true);
+DROP POLICY IF EXISTS "admin_users_select" ON public.admin_users;
+CREATE POLICY "admin_users_select" ON public.admin_users 
+    FOR SELECT USING (public.is_admin() OR auth.role() = 'service_role');
+
+DROP POLICY IF EXISTS "admin_users_modify" ON public.admin_users;
+CREATE POLICY "admin_users_modify" ON public.admin_users 
+    FOR ALL USING (public.is_admin() OR auth.role() = 'service_role');
 
 -- 3. Donors policies
-CREATE POLICY "Public read donors" ON public.donors FOR SELECT USING (true);
-CREATE POLICY "Public write donors" ON public.donors FOR ALL USING (true);
+DROP POLICY IF EXISTS "donors_select" ON public.donors;
+CREATE POLICY "donors_select" ON public.donors 
+    FOR SELECT USING (
+        user_id = (SELECT id FROM public.users WHERE auth_id = auth.uid() OR id = auth.uid())
+        OR email = (SELECT email FROM public.users WHERE auth_id = auth.uid() OR id = auth.uid())
+        OR public.is_admin()
+        OR auth.role() = 'service_role'
+    );
+
+DROP POLICY IF EXISTS "donors_insert" ON public.donors;
+CREATE POLICY "donors_insert" ON public.donors FOR INSERT WITH CHECK (true);
+
+DROP POLICY IF EXISTS "donors_update" ON public.donors;
+CREATE POLICY "donors_update" ON public.donors 
+    FOR UPDATE USING (
+        user_id = (SELECT id FROM public.users WHERE auth_id = auth.uid() OR id = auth.uid())
+        OR email = (SELECT email FROM public.users WHERE auth_id = auth.uid() OR id = auth.uid())
+        OR public.is_admin()
+        OR auth.role() = 'service_role'
+    );
 
 -- 4. Donations policies
-CREATE POLICY "Public read donations" ON public.donations FOR SELECT USING (true);
-CREATE POLICY "Public write donations" ON public.donations FOR ALL USING (true);
+DROP POLICY IF EXISTS "donations_select" ON public.donations;
+CREATE POLICY "donations_select" ON public.donations 
+    FOR SELECT USING (
+        donor_id IN (SELECT id FROM public.donors WHERE user_id = auth.uid() OR email = (SELECT email FROM public.users WHERE auth_id = auth.uid() OR id = auth.uid()))
+        OR public.is_admin()
+        OR auth.role() = 'service_role'
+        OR is_anonymous = false
+    );
 
--- 5. Campaigns policies
-CREATE POLICY "Public read active campaigns" ON public.campaigns FOR SELECT USING (true);
-CREATE POLICY "Admins manage campaigns" ON public.campaigns FOR ALL USING (true);
+DROP POLICY IF EXISTS "donations_insert" ON public.donations;
+CREATE POLICY "donations_insert" ON public.donations FOR INSERT WITH CHECK (true);
 
--- 6. Volunteers policies
-CREATE POLICY "Public read volunteers" ON public.volunteers FOR SELECT USING (true);
-CREATE POLICY "Public write volunteers" ON public.volunteers FOR ALL USING (true);
+DROP POLICY IF EXISTS "donations_update" ON public.donations;
+CREATE POLICY "donations_update" ON public.donations FOR UPDATE USING (public.is_admin() OR auth.role() = 'service_role');
 
--- 7. Beneficiaries policies
-CREATE POLICY "Public read beneficiaries" ON public.beneficiaries FOR SELECT USING (true);
-CREATE POLICY "Public write beneficiaries" ON public.beneficiaries FOR ALL USING (true);
+-- 5. Payment Orders policies
+DROP POLICY IF EXISTS "payment_orders_select" ON public.payment_orders;
+CREATE POLICY "payment_orders_select" ON public.payment_orders 
+    FOR SELECT USING (user_id = auth.uid() OR public.is_admin() OR auth.role() = 'service_role');
 
--- 8. Assistance records policies
-CREATE POLICY "Public read assistance_records" ON public.assistance_records FOR SELECT USING (true);
-CREATE POLICY "Public write assistance_records" ON public.assistance_records FOR ALL USING (true);
+DROP POLICY IF EXISTS "payment_orders_insert" ON public.payment_orders;
+CREATE POLICY "payment_orders_insert" ON public.payment_orders FOR INSERT WITH CHECK (true);
 
--- 9. Events policies
-CREATE POLICY "Public read events" ON public.events FOR SELECT USING (true);
-CREATE POLICY "Public write events" ON public.events FOR ALL USING (true);
+DROP POLICY IF EXISTS "payment_orders_update" ON public.payment_orders;
+CREATE POLICY "payment_orders_update" ON public.payment_orders FOR UPDATE USING (public.is_admin() OR auth.role() = 'service_role');
 
--- 10. Contact messages policies
-CREATE POLICY "Public read contact_messages" ON public.contact_messages FOR SELECT USING (true);
-CREATE POLICY "Public write contact_messages" ON public.contact_messages FOR ALL USING (true);
+-- 6. Webhook Events policies
+DROP POLICY IF EXISTS "webhook_events_all" ON public.webhook_events;
+CREATE POLICY "webhook_events_all" ON public.webhook_events FOR ALL USING (public.is_admin() OR auth.role() = 'service_role');
 
--- 11. Receipts policies
-CREATE POLICY "Public read receipts" ON public.receipts FOR SELECT USING (true);
-CREATE POLICY "Public write receipts" ON public.receipts FOR ALL USING (true);
+-- 7. Celebration Bookings policies
+DROP POLICY IF EXISTS "celebration_bookings_select" ON public.celebration_bookings;
+CREATE POLICY "celebration_bookings_select" ON public.celebration_bookings 
+    FOR SELECT USING (
+        donor_id IN (SELECT id FROM public.donors WHERE user_id = auth.uid() OR email = (SELECT email FROM public.users WHERE auth_id = auth.uid() OR id = auth.uid()))
+        OR customer_email = (SELECT email FROM public.users WHERE auth_id = auth.uid() OR id = auth.uid())
+        OR public.is_admin()
+        OR auth.role() = 'service_role'
+    );
 
--- 12. Notifications policies
-CREATE POLICY "Public read notifications" ON public.notifications FOR SELECT USING (true);
-CREATE POLICY "Public write notifications" ON public.notifications FOR ALL USING (true);
+DROP POLICY IF EXISTS "celebration_bookings_insert" ON public.celebration_bookings;
+CREATE POLICY "celebration_bookings_insert" ON public.celebration_bookings FOR INSERT WITH CHECK (true);
 
--- 13. Audit logs policies
-CREATE POLICY "Public read audit_logs" ON public.audit_logs FOR SELECT USING (true);
-CREATE POLICY "Public write audit_logs" ON public.audit_logs FOR ALL USING (true);
+DROP POLICY IF EXISTS "celebration_bookings_update" ON public.celebration_bookings;
+CREATE POLICY "celebration_bookings_update" ON public.celebration_bookings FOR UPDATE USING (public.is_admin() OR auth.role() = 'service_role');
 
--- 14. Celebration Bookings policies
-CREATE POLICY "Public read celebration_bookings" ON public.celebration_bookings FOR SELECT USING (true);
-CREATE POLICY "Public write celebration_bookings" ON public.celebration_bookings FOR ALL USING (true);
+DROP POLICY IF EXISTS "celebration_bookings_delete" ON public.celebration_bookings;
+CREATE POLICY "celebration_bookings_delete" ON public.celebration_bookings FOR DELETE USING (public.is_admin() OR auth.role() = 'service_role');
 
--- 15. Packages policies
-CREATE POLICY "Public read packages" ON public.packages FOR SELECT USING (true);
-CREATE POLICY "Public write packages" ON public.packages FOR ALL USING (true);
+-- 8. Campaigns policies
+DROP POLICY IF EXISTS "campaigns_select" ON public.campaigns;
+CREATE POLICY "campaigns_select" ON public.campaigns FOR SELECT USING (status = 'active' OR public.is_admin() OR auth.role() = 'service_role');
 
--- 16. Addons policies
-CREATE POLICY "Public read addons" ON public.addons FOR SELECT USING (true);
-CREATE POLICY "Public write addons" ON public.addons FOR ALL USING (true);
+DROP POLICY IF EXISTS "campaigns_admin_modify" ON public.campaigns;
+CREATE POLICY "campaigns_admin_modify" ON public.campaigns FOR ALL USING (public.is_admin() OR auth.role() = 'service_role');
 
--- 17. News policies
-CREATE POLICY "Public read news" ON public.news FOR SELECT USING (true);
-CREATE POLICY "Public write news" ON public.news FOR ALL USING (true);
+-- 9. Packages & Addons policies
+DROP POLICY IF EXISTS "packages_select" ON public.packages;
+CREATE POLICY "packages_select" ON public.packages FOR SELECT USING (is_active = true OR public.is_admin() OR auth.role() = 'service_role');
 
--- 18. Gallery Items policies
-CREATE POLICY "Public read gallery_items" ON public.gallery_items FOR SELECT USING (true);
-CREATE POLICY "Public write gallery_items" ON public.gallery_items FOR ALL USING (true);
+DROP POLICY IF EXISTS "packages_admin_modify" ON public.packages;
+CREATE POLICY "packages_admin_modify" ON public.packages FOR ALL USING (public.is_admin() OR auth.role() = 'service_role');
 
--- 19. Settings policies
-CREATE POLICY "Public read settings" ON public.settings FOR SELECT USING (true);
-CREATE POLICY "Public write settings" ON public.settings FOR ALL USING (true);
+DROP POLICY IF EXISTS "addons_select" ON public.addons;
+CREATE POLICY "addons_select" ON public.addons FOR SELECT USING (is_active = true OR public.is_admin() OR auth.role() = 'service_role');
 
--- 20. Success Stories policies
-CREATE POLICY "Public read success_stories" ON public.success_stories FOR SELECT USING (true);
-CREATE POLICY "Public write success_stories" ON public.success_stories FOR ALL USING (true);
+DROP POLICY IF EXISTS "addons_admin_modify" ON public.addons;
+CREATE POLICY "addons_admin_modify" ON public.addons FOR ALL USING (public.is_admin() OR auth.role() = 'service_role');
+
+-- 10. News & Media policies
+DROP POLICY IF EXISTS "news_select" ON public.news;
+CREATE POLICY "news_select" ON public.news FOR SELECT USING (status = 'published' OR public.is_admin() OR auth.role() = 'service_role');
+
+DROP POLICY IF EXISTS "news_admin_modify" ON public.news;
+CREATE POLICY "news_admin_modify" ON public.news FOR ALL USING (public.is_admin() OR auth.role() = 'service_role');
+
+DROP POLICY IF EXISTS "gallery_select" ON public.gallery_items;
+CREATE POLICY "gallery_select" ON public.gallery_items FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "gallery_admin_modify" ON public.gallery_items;
+CREATE POLICY "gallery_admin_modify" ON public.gallery_items FOR ALL USING (public.is_admin() OR auth.role() = 'service_role');
+
+-- 11. Events policies
+DROP POLICY IF EXISTS "events_select" ON public.events;
+CREATE POLICY "events_select" ON public.events FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "events_admin_modify" ON public.events;
+CREATE POLICY "events_admin_modify" ON public.events FOR ALL USING (public.is_admin() OR auth.role() = 'service_role');
+
+-- 12. Volunteers policies
+DROP POLICY IF EXISTS "volunteers_insert" ON public.volunteers;
+CREATE POLICY "volunteers_insert" ON public.volunteers FOR INSERT WITH CHECK (true);
+
+DROP POLICY IF EXISTS "volunteers_select" ON public.volunteers;
+CREATE POLICY "volunteers_select" ON public.volunteers FOR SELECT USING (user_id = auth.uid() OR email = (SELECT email FROM public.users WHERE auth_id = auth.uid() OR id = auth.uid()) OR public.is_admin() OR auth.role() = 'service_role');
+
+DROP POLICY IF EXISTS "volunteers_modify" ON public.volunteers;
+CREATE POLICY "volunteers_modify" ON public.volunteers FOR ALL USING (public.is_admin() OR auth.role() = 'service_role');
+
+-- 13. Beneficiaries & Assistance Records
+DROP POLICY IF EXISTS "beneficiaries_insert" ON public.beneficiaries;
+CREATE POLICY "beneficiaries_insert" ON public.beneficiaries FOR INSERT WITH CHECK (true);
+
+DROP POLICY IF EXISTS "beneficiaries_select" ON public.beneficiaries;
+CREATE POLICY "beneficiaries_select" ON public.beneficiaries FOR SELECT USING (public.is_admin() OR auth.role() = 'service_role');
+
+DROP POLICY IF EXISTS "beneficiaries_modify" ON public.beneficiaries;
+CREATE POLICY "beneficiaries_modify" ON public.beneficiaries FOR ALL USING (public.is_admin() OR auth.role() = 'service_role');
+
+DROP POLICY IF EXISTS "assistance_records_all" ON public.assistance_records;
+CREATE POLICY "assistance_records_all" ON public.assistance_records FOR ALL USING (public.is_admin() OR auth.role() = 'service_role');
+
+-- 14. Contact Messages
+DROP POLICY IF EXISTS "contact_insert" ON public.contact_messages;
+CREATE POLICY "contact_insert" ON public.contact_messages FOR INSERT WITH CHECK (true);
+
+DROP POLICY IF EXISTS "contact_select_modify" ON public.contact_messages;
+CREATE POLICY "contact_select_modify" ON public.contact_messages FOR ALL USING (public.is_admin() OR auth.role() = 'service_role');
+
+-- 15. Settings
+DROP POLICY IF EXISTS "settings_select" ON public.settings;
+CREATE POLICY "settings_select" ON public.settings FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "settings_admin_modify" ON public.settings;
+CREATE POLICY "settings_admin_modify" ON public.settings FOR ALL USING (public.is_admin() OR auth.role() = 'service_role');
+
+-- 16. Notifications & Audit Logs
+DROP POLICY IF EXISTS "notifications_select" ON public.notifications;
+CREATE POLICY "notifications_select" ON public.notifications FOR SELECT USING (user_id = auth.uid() OR public.is_admin() OR auth.role() = 'service_role');
+
+DROP POLICY IF EXISTS "notifications_update" ON public.notifications;
+CREATE POLICY "notifications_update" ON public.notifications FOR UPDATE USING (user_id = auth.uid() OR public.is_admin() OR auth.role() = 'service_role');
+
+DROP POLICY IF EXISTS "notifications_insert" ON public.notifications;
+CREATE POLICY "notifications_insert" ON public.notifications FOR INSERT WITH CHECK (true);
+
+DROP POLICY IF EXISTS "audit_logs_select" ON public.audit_logs;
+CREATE POLICY "audit_logs_select" ON public.audit_logs FOR SELECT USING (public.is_admin() OR auth.role() = 'service_role');
+
+DROP POLICY IF EXISTS "audit_logs_insert" ON public.audit_logs;
+CREATE POLICY "audit_logs_insert" ON public.audit_logs FOR INSERT WITH CHECK (true);
+
+-- 17. Success Stories
+DROP POLICY IF EXISTS "success_stories_select" ON public.success_stories;
+CREATE POLICY "success_stories_select" ON public.success_stories FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "success_stories_admin_modify" ON public.success_stories;
+CREATE POLICY "success_stories_admin_modify" ON public.success_stories FOR ALL USING (public.is_admin() OR auth.role() = 'service_role');
+
+-- 18. Receipts
+DROP POLICY IF EXISTS "receipts_select" ON public.receipts;
+CREATE POLICY "receipts_select" ON public.receipts FOR SELECT USING (
+    donation_id IN (
+        SELECT id FROM public.donations 
+        WHERE donor_id IN (
+            SELECT id FROM public.donors 
+            WHERE user_id = auth.uid() OR email = (SELECT email FROM public.users WHERE auth_id = auth.uid() OR id = auth.uid())
+        )
+    ) OR public.is_admin() OR auth.role() = 'service_role'
+);
+
+DROP POLICY IF EXISTS "receipts_insert_modify" ON public.receipts;
+CREATE POLICY "receipts_insert_modify" ON public.receipts FOR ALL USING (public.is_admin() OR auth.role() = 'service_role');
 
 --------------------------------------------------------------------------------
 -- TRIGGER FOR AUTOMATIC USER PROFILES SYNCHRONIZATION FROM SUPABASE AUTH
@@ -673,4 +866,68 @@ VALUES
   ('Eye Diagnostics Jawadhu Hills', 'Medical Camps', 'image', 'https://images.unsplash.com/photo-1576091160550-2173dba999ef?auto=format&fit=crop&q=80&w=600', 'https://images.unsplash.com/photo-1576091160550-2173dba999ef?auto=format&fit=crop&q=80&w=300', '1bBcDeFgHiJkLmNoPqRsTuVwXyZ02', '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs', 'eye_diagnostics_camp.jpg', 2180400),
   ('Annadanam Feeding Koyambedu', 'Food Distribution', 'image', 'https://images.unsplash.com/photo-1488521787991-ed7bbaae773c?auto=format&fit=crop&q=80&w=600', 'https://images.unsplash.com/photo-1488521787991-ed7bbaae773c?auto=format&fit=crop&q=80&w=300', '1cBcDeFgHiJkLmNoPqRsTuVwXyZ03', '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs', 'annadanam_koyambedu_feeding.jpg', 1890200)
 ON CONFLICT DO NOTHING;
+
+--------------------------------------------------------------------------------
+-- PROFILES TABLE SCHEMA (auth.users extension, RLS, and Auto-Create Trigger)
+--------------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS public.profiles (
+    id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+    full_name TEXT NOT NULL,
+    phone_number TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL
+);
+
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "profiles_select_own" ON public.profiles;
+CREATE POLICY "profiles_select_own" ON public.profiles
+    FOR SELECT USING (auth.uid() = id);
+
+DROP POLICY IF EXISTS "profiles_insert_own" ON public.profiles;
+CREATE POLICY "profiles_insert_own" ON public.profiles
+    FOR INSERT WITH CHECK (auth.uid() = id);
+
+DROP POLICY IF EXISTS "profiles_update_own" ON public.profiles;
+CREATE POLICY "profiles_update_own" ON public.profiles
+    FOR UPDATE USING (auth.uid() = id) WITH CHECK (auth.uid() = id);
+
+DROP POLICY IF EXISTS "profiles_delete_own" ON public.profiles;
+CREATE POLICY "profiles_delete_own" ON public.profiles
+    FOR DELETE USING (auth.uid() = id);
+
+DROP POLICY IF EXISTS "profiles_service_role" ON public.profiles;
+CREATE POLICY "profiles_service_role" ON public.profiles
+    FOR ALL USING (auth.role() = 'service_role');
+
+CREATE OR REPLACE FUNCTION public.handle_new_user_profile()
+RETURNS trigger AS $$
+BEGIN
+  INSERT INTO public.profiles (id, full_name, phone_number, created_at)
+  VALUES (
+    new.id,
+    COALESCE(
+      new.raw_user_meta_data->>'full_name',
+      new.raw_user_meta_data->>'name',
+      split_part(new.email, '@', 1)
+    ),
+    COALESCE(
+      new.raw_user_meta_data->>'phone_number',
+      new.raw_user_meta_data->>'phone'
+    ),
+    NOW()
+  )
+  ON CONFLICT (id) DO UPDATE
+  SET full_name = EXCLUDED.full_name,
+      phone_number = COALESCE(EXCLUDED.phone_number, public.profiles.phone_number);
+
+  RETURN new;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+DROP TRIGGER IF EXISTS on_auth_user_created_profile ON auth.users;
+CREATE TRIGGER on_auth_user_created_profile
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user_profile();
+
 

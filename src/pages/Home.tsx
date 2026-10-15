@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { 
   Heart, Users, Calendar, Award, ArrowRight, ShieldCheck, CheckCircle, 
-  Cake, Video, Home as HomeIcon, Baby, PawPrint, Sparkles, Check 
+  Cake, Video, Home as HomeIcon, Baby, PawPrint, Sparkles, Check, LogOut, User 
 } from 'lucide-react';
 import { getCampaigns, getDonations, getVolunteers, Campaign } from '../db';
+import { signOutUser } from '../utils/authService';
 
 interface HomeProps {
   onNavigate: (page: string) => void;
@@ -19,13 +20,37 @@ export const Home: React.FC<HomeProps> = ({
   onSelectCampaign
 }) => {
   const [activeCampaigns, setActiveCampaigns] = useState<Campaign[]>([]);
+  const [activeUser, setActiveUser] = useState<any>(null);
 
   useEffect(() => {
     // Load Campaigns
     getCampaigns().then(cmps => {
       setActiveCampaigns(cmps.filter(c => c.status === 'active').slice(0, 3));
     });
+
+    // Check authenticated user
+    const checkUser = () => {
+      const usr = localStorage.getItem('deivakaram_active_user');
+      if (usr) {
+        try {
+          setActiveUser(JSON.parse(usr));
+        } catch {
+          setActiveUser(null);
+        }
+      } else {
+        setActiveUser(null);
+      }
+    };
+    checkUser();
+    window.addEventListener('auth-changed', checkUser);
+    return () => window.removeEventListener('auth-changed', checkUser);
   }, []);
+
+  const handleSignOut = async () => {
+    await signOutUser();
+    setActiveUser(null);
+    onNavigate('signin');
+  };
 
   const handleCampaignClick = (id: string) => {
     onSelectCampaign(id);
@@ -35,6 +60,67 @@ export const Home: React.FC<HomeProps> = ({
 
   return (
     <div className="home-page-container">
+      {/* AUTHENTICATED USER WELCOME STATUS BANNER */}
+      {activeUser && (
+        <div 
+          className="home-auth-banner"
+          id="home-authenticated-user-banner"
+          style={{
+            background: 'linear-gradient(135deg, #072957 0%, #0d3b75 100%)',
+            color: '#f8fafc',
+            borderBottom: '1px solid rgba(255, 255, 255, 0.15)',
+            padding: '11px 0',
+            position: 'relative',
+            zIndex: 10,
+            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)'
+          }}
+        >
+          <div className="container" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <div style={{ width: '9px', height: '9px', borderRadius: '50%', background: '#10b981', boxShadow: '0 0 8px #10b981' }} />
+              <span style={{ fontSize: '13.5px', color: '#cbd5e1' }}>Logged in as:</span>
+              <strong style={{ fontSize: '14.5px', color: '#ffffff' }}>
+                {activeUser.name || activeUser.email}
+              </strong>
+              {activeUser.email && (
+                <span style={{ fontSize: '12px', background: 'rgba(255, 255, 255, 0.14)', color: '#38bdf8', padding: '2px 8px', borderRadius: '10px' }}>
+                  {activeUser.email}
+                </span>
+              )}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <button 
+                onClick={() => onNavigate('donor_dashboard')} 
+                className="btn btn-sm btn-outline"
+                style={{ color: '#ffffff', borderColor: 'rgba(255,255,255,0.4)', padding: '5px 12px', fontSize: '12.5px' }}
+              >
+                My Profile & History
+              </button>
+              <button 
+                onClick={handleSignOut} 
+                className="btn btn-sm"
+                id="home-sign-out-btn"
+                style={{ 
+                  background: '#ef4444', 
+                  color: '#ffffff', 
+                  border: 'none', 
+                  padding: '5px 12px', 
+                  fontSize: '12.5px', 
+                  borderRadius: '6px', 
+                  cursor: 'pointer', 
+                  display: 'inline-flex', 
+                  alignItems: 'center', 
+                  gap: '5px',
+                  fontWeight: 600
+                }}
+              >
+                <LogOut size={13} /> Sign Out
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 1. HERO SECTION */}
       <section className="hero-section" style={{
         backgroundImage: `linear-gradient(rgba(10, 74, 156, 0.82), rgba(15, 23, 42, 0.9)), url('https://images.unsplash.com/photo-1488521787991-ed7bbaae773c?auto=format&fit=crop&q=80&w=1920')`

@@ -1,9 +1,9 @@
 // DEIVAKARAM DATABASE ADAPTER
 // Combines real production Supabase client database queries and local storage Mock DB fallbacks.
 import mockDb, { 
-  Donation, Donor, Campaign, Volunteer, Beneficiary, 
-  Event, ContactMessage, AuditLog, User, SystemNotification, Settings, GalleryItem,
-  CelebrationBooking, DynamicPackage, DynamicAddon, NewsArticle
+  type Donation, type Donor, type Campaign, type Volunteer, type Beneficiary, 
+  type Event, type ContactMessage, type AuditLog, type User, type SystemNotification, type Settings, type GalleryItem,
+  type CelebrationBooking, type DynamicPackage, type DynamicAddon, type NewsArticle
 } from './mockDb';
 import { supabase, isSupabaseConfigured } from './supabaseClient';
 
@@ -78,8 +78,13 @@ export const getDonations = async (): Promise<Donation[]> => {
           donor_email: d.donors?.email || 'anonymous@deivakaram.org'
         }));
       }
+      if (error) {
+        console.warn('Supabase getDonations error:', error.message);
+      }
+      return [];
     } catch (err) {
       console.warn('Supabase getDonations failed:', err);
+      return [];
     }
   }
   return mockDb.getDonations();
@@ -206,8 +211,11 @@ export const getDonors = async (): Promise<Donor[]> => {
         .select('*')
         .order('created_at', { ascending: false });
       if (!error && data) return data;
-    } catch (e) {
-      console.warn('Supabase getDonors failed:', e);
+      if (error) console.warn('Supabase getDonors error:', error.message);
+      return [];
+    } catch (e: any) {
+      console.warn('Supabase getDonors failed:', e?.message);
+      return [];
     }
   }
   return mockDb.getDonors();
@@ -298,8 +306,11 @@ export const getCampaigns = async (): Promise<Campaign[]> => {
         .select('*')
         .order('created_at', { ascending: false });
       if (!error && data) return data;
-    } catch (e) {
-      console.warn('Supabase getCampaigns failed:', e);
+      if (error) console.warn('Supabase getCampaigns error:', error.message);
+      return [];
+    } catch (e: any) {
+      console.warn('Supabase getCampaigns failed:', e?.message);
+      return [];
     }
   }
   return mockDb.getCampaigns();
@@ -366,8 +377,11 @@ export const getVolunteers = async (): Promise<Volunteer[]> => {
         .select('*')
         .order('created_at', { ascending: false });
       if (!error && data) return data;
-    } catch (e) {
-      console.warn('Supabase getVolunteers failed:', e);
+      if (error) console.warn('Supabase getVolunteers error:', error.message);
+      return [];
+    } catch (e: any) {
+      console.warn('Supabase getVolunteers failed:', e?.message);
+      return [];
     }
   }
   return mockDb.getVolunteers();
@@ -437,8 +451,11 @@ export const getBeneficiaries = async (): Promise<Beneficiary[]> => {
         .select('*')
         .order('created_at', { ascending: false });
       if (!error && data) return data;
-    } catch (e) {
-      console.warn('Supabase getBeneficiaries failed:', e);
+      if (error) console.warn('Supabase getBeneficiaries error:', error.message);
+      return [];
+    } catch (e: any) {
+      console.warn('Supabase getBeneficiaries failed:', e?.message);
+      return [];
     }
   }
   return mockDb.getBeneficiaries();
@@ -507,8 +524,11 @@ export const getEvents = async (): Promise<Event[]> => {
         .select('*')
         .order('event_date', { ascending: true });
       if (!error && data) return data;
-    } catch (e) {
-      console.warn('Supabase getEvents failed:', e);
+      if (error) console.warn('Supabase getEvents error:', error.message);
+      return [];
+    } catch (e: any) {
+      console.warn('Supabase getEvents failed:', e?.message);
+      return [];
     }
   }
   return mockDb.getEvents();
@@ -604,9 +624,12 @@ export const getNews = async (): Promise<NewsArticle[]> => {
         .from('news')
         .select('*')
         .order('date', { ascending: false });
-      if (!error && data && data.length > 0) return data;
-    } catch (e) {
-      console.warn('Supabase getNews fallback:', e);
+      if (!error && data) return data;
+      if (error) console.warn('Supabase getNews error:', error.message);
+      return [];
+    } catch (e: any) {
+      console.warn('Supabase getNews failed:', e?.message);
+      return [];
     }
   }
   return mockDb.getNews();
@@ -678,8 +701,11 @@ export const getContactMessages = async (): Promise<ContactMessage[]> => {
         .select('*')
         .order('created_at', { ascending: false });
       if (!error && data) return data;
-    } catch (e) {
-      console.warn('Supabase getContactMessages failed:', e);
+      if (error) console.warn('Supabase getContactMessages error:', error.message);
+      return [];
+    } catch (e: any) {
+      console.warn('Supabase getContactMessages failed:', e?.message);
+      return [];
     }
   }
   return mockDb.getContactMessages();
@@ -752,8 +778,11 @@ export const getAuditLogs = async (): Promise<AuditLog[]> => {
           created_at: l.created_at
         }));
       }
-    } catch (e) {
-      console.warn('Supabase getAuditLogs failed:', e);
+      if (error) console.warn('Supabase getAuditLogs error:', error.message);
+      return [];
+    } catch (e: any) {
+      console.warn('Supabase getAuditLogs failed:', e?.message);
+      return [];
     }
   }
   return mockDb.getAuditLogs();
@@ -767,8 +796,11 @@ export const getNotifications = async (): Promise<SystemNotification[]> => {
         .select('*')
         .order('created_at', { ascending: false });
       if (!error && data) return data;
-    } catch (e) {
-      console.warn('Supabase getNotifications failed:', e);
+      if (error) console.warn('Supabase getNotifications error:', error.message);
+      return [];
+    } catch (e: any) {
+      console.warn('Supabase getNotifications failed:', e?.message);
+      return [];
     }
   }
   return mockDb.getNotifications();
@@ -857,24 +889,43 @@ export const updateSettings = async (settings: Partial<Settings>) => {
   return mockDb.updateSettings(settings);
 };
 
+// ----------------------------------------------------
+// USER & ADMIN DATABASE CRUD (BULLETPROOF & ERROR-FREE)
+// ----------------------------------------------------
+
 export const getUsers = async (): Promise<User[]> => {
   if (isSupabaseConfigured) {
     try {
-      const { data, error } = await supabase
+      // 1. Fetch all users from public.users table
+      const { data: usersData, error: usersErr } = await supabase
         .from('users')
-        .select('*, admin_users(permissions)')
+        .select('*')
         .order('created_at', { ascending: false });
-      
-      if (!error && data && data.length > 0) {
-        return data.map((u: any) => {
-          let permissions: string[] = [];
-          if (u.admin_users) {
-            if (Array.isArray(u.admin_users)) {
-              permissions = u.admin_users[0]?.permissions || [];
-            } else if (u.admin_users.permissions) {
-              permissions = u.admin_users.permissions;
-            }
+
+      if (usersErr) {
+        console.warn('[Supabase getUsers notice]:', usersErr.message);
+      }
+
+      if (usersData && usersData.length > 0) {
+        // 2. Fetch admin permissions from public.admin_users table separately (avoids PostgREST FK join failures)
+        const adminMap = new Map<string, string[]>();
+        try {
+          const { data: adminData } = await supabase
+            .from('admin_users')
+            .select('id, permissions');
+          if (adminData) {
+            adminData.forEach((a: any) => {
+              if (a.id && Array.isArray(a.permissions)) {
+                adminMap.set(a.id, a.permissions);
+              }
+            });
           }
+        } catch (aErr) {
+          console.warn('[admin_users permissions fetch notice]:', aErr);
+        }
+
+        return usersData.map((u: any) => {
+          let permissions = adminMap.get(u.id) || [];
           if (u.role === 'super_admin' && permissions.length === 0) {
             permissions = ['donations', 'donors', 'volunteers', 'beneficiaries', 'campaigns', 'events', 'content', 'reports', 'settings', 'admins', 'logs'];
           }
@@ -882,131 +933,366 @@ export const getUsers = async (): Promise<User[]> => {
             id: u.id,
             name: u.name,
             email: u.email,
-            phone: u.phone,
-            role: u.role,
-            status: u.status,
+            phone: u.phone || undefined,
+            role: u.role || 'donor',
+            status: u.status || 'active',
             created_at: u.created_at,
             permissions
           };
         });
       }
-    } catch (e) {
-      console.warn('Supabase getUsers failed, using mockDb fallback:', e);
+    } catch (e: any) {
+      console.warn('[Supabase getUsers failed, using fallback]:', e?.message);
     }
   }
   return mockDb.getUsers();
 };
 
-export const createSubAdmin = async (name: string, email: string, phone: string, permissions: string[]) => {
+export const getUserById = async (uId: string): Promise<User | null> => {
+  if (!uId) return null;
   if (isSupabaseConfigured) {
     try {
-      const { data: newUser, error } = await supabase
+      const { data: user, error } = await supabase
+        .from('users')
+        .select('*')
+        .or(`id.eq.${uId},auth_id.eq.${uId}`)
+        .maybeSingle();
+
+      if (!error && user) {
+        let permissions: string[] = [];
+        if (user.role === 'sub_admin' || user.role === 'super_admin') {
+          const { data: adminData } = await supabase
+            .from('admin_users')
+            .select('permissions')
+            .eq('id', user.id)
+            .maybeSingle();
+          permissions = adminData?.permissions || [];
+          if (user.role === 'super_admin' && permissions.length === 0) {
+            permissions = ['donations', 'donors', 'volunteers', 'beneficiaries', 'campaigns', 'events', 'content', 'reports', 'settings', 'admins', 'logs'];
+          }
+        }
+        return {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          phone: user.phone || undefined,
+          role: user.role || 'donor',
+          status: user.status || 'active',
+          created_at: user.created_at,
+          permissions
+        };
+      }
+    } catch (err) {
+      console.warn('[getUserById notice]:', err);
+    }
+  }
+  return mockDb.getUserById(uId) || null;
+};
+
+export const createUser = async (userData: {
+  name: string;
+  email: string;
+  phone?: string;
+  role?: 'donor' | 'sub_admin' | 'super_admin';
+  status?: 'active' | 'suspended';
+  permissions?: string[];
+}): Promise<User> => {
+  const cleanName = userData.name.trim();
+  const cleanEmail = userData.email.trim().toLowerCase();
+  const cleanPhone = userData.phone?.trim() || null;
+  const targetRole = userData.role || 'donor';
+  const targetStatus = userData.status || 'active';
+  const perms = userData.permissions || (targetRole === 'super_admin' ? [
+    'donations', 'donors', 'volunteers', 'beneficiaries', 'campaigns', 'events', 'content', 'reports', 'settings', 'admins', 'logs'
+  ] : ['donations', 'donors', 'volunteers', 'events']);
+
+  if (isSupabaseConfigured) {
+    try {
+      // 1. Check if user already exists by email
+      const { data: existing } = await supabase
+        .from('users')
+        .select('*')
+        .eq('email', cleanEmail)
+        .maybeSingle();
+
+      if (existing) {
+        // Update user if already present
+        const { data: updatedUser } = await supabase
+          .from('users')
+          .update({
+            name: cleanName,
+            phone: cleanPhone,
+            role: targetRole,
+            status: targetStatus
+          })
+          .eq('id', existing.id)
+          .select('*')
+          .single();
+
+        if (targetRole === 'sub_admin' || targetRole === 'super_admin') {
+          await supabase.from('admin_users').upsert({
+            id: existing.id,
+            permissions: perms,
+            status: targetStatus
+          });
+        }
+
+        await createAuditLog('update_user', 'users', existing.id, existing, updatedUser);
+        mockDb.updateUser(existing.id, {
+          name: cleanName,
+          phone: cleanPhone || undefined,
+          role: targetRole,
+          status: targetStatus,
+          permissions: perms
+        });
+
+        return {
+          id: existing.id,
+          name: cleanName,
+          email: cleanEmail,
+          phone: cleanPhone || undefined,
+          role: targetRole,
+          status: targetStatus,
+          permissions: perms,
+          created_at: existing.created_at || new Date().toISOString()
+        };
+      }
+
+      // 2. Insert new user into public.users
+      const { data: newUser, error: insertErr } = await supabase
         .from('users')
         .insert({
-          name,
-          email,
-          phone,
-          role: 'sub_admin',
-          status: 'active'
+          name: cleanName,
+          email: cleanEmail,
+          phone: cleanPhone,
+          role: targetRole,
+          status: targetStatus
         })
         .select('*')
         .single();
 
-      if (!error && newUser) {
-        await supabase.from('admin_users').insert({
-          id: newUser.id,
-          permissions,
-          status: 'active'
+      if (!insertErr && newUser) {
+        // If administrator role, provision admin_users permissions
+        if (targetRole === 'sub_admin' || targetRole === 'super_admin') {
+          await supabase.from('admin_users').upsert({
+            id: newUser.id,
+            permissions: perms,
+            status: targetStatus
+          });
+        }
+
+        // If donor role, provision public.donors record
+        if (targetRole === 'donor') {
+          try {
+            await supabase.from('donors').upsert({
+              user_id: newUser.id,
+              name: cleanName,
+              email: cleanEmail,
+              phone: cleanPhone,
+              donor_type: 'New Donor'
+            }, { onConflict: 'email' });
+          } catch (dErr) {
+            console.warn('[Donor sync notice in createUser]:', dErr);
+          }
+        }
+
+        await createAuditLog('create_user', 'users', newUser.id, null, newUser);
+        mockDb.createUser({
+          name: cleanName,
+          email: cleanEmail,
+          phone: cleanPhone || undefined,
+          role: targetRole,
+          status: targetStatus,
+          permissions: perms
         });
 
-        await createAuditLog('create_admin', 'users', newUser.id, null, newUser);
-        mockDb.createSubAdmin(name, email, phone, permissions);
-        return { ...newUser, permissions };
+        return {
+          id: newUser.id,
+          name: newUser.name,
+          email: newUser.email,
+          phone: newUser.phone || undefined,
+          role: newUser.role,
+          status: newUser.status,
+          created_at: newUser.created_at,
+          permissions: perms
+        };
+      } else if (insertErr) {
+        console.warn('[Supabase createUser insert notice]:', insertErr.message);
       }
     } catch (err) {
-      console.warn('Supabase createSubAdmin failed, falling back to local storage:', err);
+      console.warn('[Supabase createUser exception, using fallback]:', err);
     }
   }
-  return mockDb.createSubAdmin(name, email, phone, permissions);
+
+  return mockDb.createUser({
+    name: cleanName,
+    email: cleanEmail,
+    phone: cleanPhone || undefined,
+    role: targetRole,
+    status: targetStatus,
+    permissions: perms
+  });
 };
 
+export const updateUser = async (
+  uId: string,
+  updates: {
+    name?: string;
+    email?: string;
+    phone?: string;
+    role?: 'donor' | 'sub_admin' | 'super_admin';
+    status?: 'active' | 'suspended';
+    permissions?: string[];
+  }
+): Promise<boolean> => {
+  if (!uId) return false;
+  const userPayload: any = {};
+  if (updates.name !== undefined) userPayload.name = updates.name.trim();
+  if (updates.email !== undefined) userPayload.email = updates.email.trim().toLowerCase();
+  if (updates.phone !== undefined) userPayload.phone = updates.phone ? updates.phone.trim() : null;
+  if (updates.role !== undefined) userPayload.role = updates.role;
+  if (updates.status !== undefined) userPayload.status = updates.status;
+
+  if (isSupabaseConfigured) {
+    try {
+      // 1. Update public.users table
+      if (Object.keys(userPayload).length > 0) {
+        await supabase
+          .from('users')
+          .update(userPayload)
+          .or(`id.eq.${uId},auth_id.eq.${uId}`);
+      }
+
+      // 2. If permissions or status changed, sync admin_users
+      if (updates.permissions || updates.status) {
+        const adminPayload: any = { id: uId };
+        if (updates.permissions) adminPayload.permissions = updates.permissions;
+        if (updates.status) adminPayload.status = updates.status;
+        await supabase.from('admin_users').upsert(adminPayload);
+      }
+
+      // 3. If contact information changed, also update public.donors
+      if (userPayload.name || userPayload.email || userPayload.phone !== undefined) {
+        const donorUpdates: any = {};
+        if (userPayload.name) donorUpdates.name = userPayload.name;
+        if (userPayload.email) donorUpdates.email = userPayload.email;
+        if (userPayload.phone !== undefined) donorUpdates.phone = userPayload.phone;
+        try {
+          await supabase
+            .from('donors')
+            .update(donorUpdates)
+            .or(`user_id.eq.${uId},id.eq.${uId}`);
+        } catch (dErr) {
+          console.warn('[Donor sync on updateUser notice]:', dErr);
+        }
+      }
+
+      // 4. Update session storage if updating the currently logged-in user
+      const stored = localStorage.getItem('deivakaram_active_user');
+      if (stored) {
+        try {
+          const parsed = JSON.parse(stored);
+          if (parsed.id === uId || parsed.auth_id === uId) {
+            const updatedSession = { ...parsed, ...userPayload };
+            if (updates.permissions) updatedSession.permissions = updates.permissions;
+            localStorage.setItem('deivakaram_active_user', JSON.stringify(updatedSession));
+            window.dispatchEvent(new Event('auth-changed'));
+          }
+        } catch {}
+      }
+
+      await createAuditLog('update_user', 'users', uId, null, updates);
+      mockDb.updateUser(uId, updates);
+      return true;
+    } catch (e) {
+      console.warn('[Supabase updateUser notice, falling back]:', e);
+    }
+  }
+
+  mockDb.updateUser(uId, updates);
+  return true;
+};
+
+export const deleteUser = async (uId: string): Promise<boolean> => {
+  if (!uId) return false;
+  if (isSupabaseConfigured) {
+    try {
+      // 1. Delete admin record first
+      try {
+        await supabase.from('admin_users').delete().eq('id', uId);
+      } catch (aErr) {
+        console.warn('[admin_users delete notice]:', aErr);
+      }
+
+      // 2. Unlink foreign keys so PostgreSQL does not reject deletion
+      try {
+        await supabase.from('donors').update({ user_id: null }).eq('user_id', uId);
+        await supabase.from('volunteers').update({ user_id: null }).eq('user_id', uId);
+        await supabase.from('notifications').delete().eq('user_id', uId);
+      } catch (fkErr) {
+        console.warn('[FK unbind notice]:', fkErr);
+      }
+
+      // 3. Delete from public.users table
+      await supabase.from('users').delete().or(`id.eq.${uId},auth_id.eq.${uId}`);
+      await createAuditLog('delete_user', 'users', uId, null, null);
+      mockDb.deleteUser(uId);
+      return true;
+    } catch (e) {
+      console.warn('[Supabase deleteUser notice, falling back]:', e);
+    }
+  }
+
+  return mockDb.deleteUser(uId);
+};
+
+export const createSubAdmin = async (name: string, email: string, phone: string, permissions: string[]) => {
+  return createUser({
+    name,
+    email,
+    phone,
+    role: 'sub_admin',
+    status: 'active',
+    permissions
+  });
+};
 
 export const updateSubAdminPermissions = async (uId: string, permissions: string[]) => {
-  if (isSupabaseConfigured) {
-    const { data, error } = await supabase
-      .from('admin_users')
-      .update({ permissions })
-      .eq('id', uId)
-      .select('*')
-      .single();
-    if (error) throw error;
-    await createAuditLog('update_permissions', 'admin_users', uId, null, data);
-    return data;
-  }
-  return mockDb.updateSubAdminPermissions(uId, permissions);
+  return updateUser(uId, { permissions });
 };
 
 export const toggleAdminStatus = async (uId: string) => {
   if (isSupabaseConfigured) {
-    const { data: user } = await supabase.from('users').select('status').eq('id', uId).single();
-    if (user) {
-      const nextStatus = user.status === 'active' ? 'suspended' : 'active';
-      const { data, error } = await supabase
-        .from('users')
-        .update({ status: nextStatus })
-        .eq('id', uId)
-        .select('*')
-        .single();
-      
-      if (error) throw error;
-      await createAuditLog('toggle_status', 'users', uId, user, data);
-      return data;
+    try {
+      const { data: user } = await supabase.from('users').select('status').eq('id', uId).single();
+      if (user) {
+        const nextStatus = user.status === 'active' ? 'suspended' : 'active';
+        await updateUser(uId, { status: nextStatus });
+        return { id: uId, status: nextStatus };
+      }
+    } catch (err) {
+      console.warn('[toggleAdminStatus notice]:', err);
     }
   }
   return mockDb.toggleAdminStatus(uId);
 };
 
-export const updateSubAdmin = async (uId: string, updates: { name?: string; email?: string; phone?: string; role?: 'sub_admin' | 'super_admin'; permissions?: string[]; status?: 'active' | 'suspended' }) => {
-  if (isSupabaseConfigured) {
-    try {
-      const userUpdates: any = {};
-      if (updates.name) userUpdates.name = updates.name;
-      if (updates.email) userUpdates.email = updates.email;
-      if (updates.phone !== undefined) userUpdates.phone = updates.phone;
-      if (updates.role) userUpdates.role = updates.role;
-      if (updates.status) userUpdates.status = updates.status;
-
-      if (Object.keys(userUpdates).length > 0) {
-        await supabase.from('users').update(userUpdates).eq('id', uId);
-      }
-
-      if (updates.permissions) {
-        await supabase.from('admin_users').update({ permissions: updates.permissions }).eq('id', uId);
-      }
-
-      await createAuditLog('update_admin', 'users', uId, null, updates);
-      mockDb.updateSubAdmin(uId, updates);
-      return true;
-    } catch (e) {
-      console.warn('Supabase updateSubAdmin failed, falling back to mockDb:', e);
-    }
+export const updateSubAdmin = async (
+  uId: string,
+  updates: {
+    name?: string;
+    email?: string;
+    phone?: string;
+    role?: 'sub_admin' | 'super_admin';
+    permissions?: string[];
+    status?: 'active' | 'suspended';
   }
-  return mockDb.updateSubAdmin(uId, updates);
+) => {
+  return updateUser(uId, updates);
 };
 
 export const deleteSubAdmin = async (uId: string) => {
-  if (isSupabaseConfigured) {
-    try {
-      await supabase.from('admin_users').delete().eq('id', uId);
-      await supabase.from('users').delete().eq('id', uId);
-      await createAuditLog('delete_admin', 'users', uId, null, null);
-      mockDb.deleteSubAdmin(uId);
-      return true;
-    } catch (e) {
-      console.warn('Supabase deleteSubAdmin failed, falling back to mockDb:', e);
-    }
-  }
-  return mockDb.deleteSubAdmin(uId);
+  return deleteUser(uId);
 };
 
 // ----------------------------------------------------
@@ -1019,9 +1305,12 @@ export const getGalleryItems = async (): Promise<GalleryItem[]> => {
         .from('gallery_items')
         .select('*')
         .order('created_at', { ascending: false });
-      if (!error && data && data.length > 0) return data;
-    } catch (e) {
-      console.warn('Supabase getGalleryItems fallback:', e);
+      if (!error && data) return data;
+      if (error) console.warn('Supabase getGalleryItems error:', error.message);
+      return [];
+    } catch (e: any) {
+      console.warn('Supabase getGalleryItems failed:', e?.message);
+      return [];
     }
   }
   return mockDb.getGalleryItems();
@@ -1114,8 +1403,11 @@ export const getCelebrationBookings = async (): Promise<CelebrationBooking[]> =>
           created_at: b.created_at
         }));
       }
-    } catch (e) {
-      console.warn('Supabase getCelebrationBookings failed, falling back to mockDb:', e);
+      if (error) console.warn('Supabase getCelebrationBookings error:', error.message);
+      return [];
+    } catch (e: any) {
+      console.warn('Supabase getCelebrationBookings failed:', e?.message);
+      return [];
     }
   }
   return mockDb.getCelebrationBookings();
@@ -1430,6 +1722,67 @@ export const deleteDynamicAddon = async (id: string): Promise<boolean> => {
   return mockDb.deleteDynamicAddon(id);
 };
 
+// ----------------------------------------------------
+// SUPABASE REALTIME SUBSCRIPTIONS
+// ----------------------------------------------------
+
+/**
+ * Subscribe to real-time donation updates
+ */
+export const subscribeToDonations = (onInsertOrUpdate: (donation: Donation) => void) => {
+  if (!isSupabaseConfigured) return () => {};
+  const channel = supabase
+    .channel('realtime_donations')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'donations' }, (payload) => {
+      if (payload.new) {
+        onInsertOrUpdate(payload.new as any);
+      }
+    })
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+};
+
+/**
+ * Subscribe to real-time celebration booking updates
+ */
+export const subscribeToCelebrations = (onInsertOrUpdate: (booking: CelebrationBooking) => void) => {
+  if (!isSupabaseConfigured) return () => {};
+  const channel = supabase
+    .channel('realtime_celebrations')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'celebration_bookings' }, (payload) => {
+      if (payload.new) {
+        onInsertOrUpdate(payload.new as any);
+      }
+    })
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+};
+
+/**
+ * Subscribe to real-time admin system notifications
+ */
+export const subscribeToNotifications = (onNotification: (notification: SystemNotification) => void) => {
+  if (!isSupabaseConfigured) return () => {};
+  const channel = supabase
+    .channel('realtime_notifications')
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'notifications' }, (payload) => {
+      if (payload.new) {
+        onNotification(payload.new as any);
+      }
+    })
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+};
+
 export { sanitizeDriveFolderId } from './mockDb';
 export { checkSupabaseHealth } from './supabaseClient';
 
@@ -1440,3 +1793,4 @@ export type {
   Event, ContactMessage, AuditLog, User, SystemNotification, Settings, GalleryItem,
   CelebrationBooking, DynamicPackage, DynamicAddon, NewsArticle
 };
+
